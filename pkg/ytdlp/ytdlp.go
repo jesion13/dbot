@@ -49,6 +49,8 @@ func init() {
 			"--no-playlist",
 			"--audio-format",
 			"opus",
+			"--trim-filenames", "100",
+			"-o", "%(title).100s [%(id)s].%(ext)s",
 		}
 		videoDownloadCMD = []string{
 			"--no-simulate",
@@ -57,6 +59,8 @@ func init() {
 			"--no-playlist",
 			"-f",
 			"bestvideo+bestaudio/best",
+			"--trim-filenames", "100",
+			"-o", "%(title).100s [%(id)s].%(ext)s",
 		}
 		videoDownloadSmallCMD = []string{
 			"--no-simulate",
@@ -66,6 +70,8 @@ func init() {
 			"-f",
 			`bv*[filesize<8M]+ba[filesize<2M]/b[filesize<10M]/bv*[height<=720]+ba/b[height<=720]/b`,
 			"--format-sort", "res,fps~30,codec:av01",
+			"--trim-filenames", "100",
+			"-o", "%(title).100s [%(id)s].%(ext)s",
 		}
 
 		playlistInfoCMD = []string{
@@ -91,7 +97,7 @@ func (YTDLP) DownloadAudio(link string) (VideoMeta, error) {
 		return VideoMeta{}, errors.Join(errors.New("Special Links Parser"), err)
 	}
 
-	cmd := exec.Command(ytdlp, append(audioDownloadCMD, link)...)
+	cmd := exec.Command(ytdlp, append(audioDownloadCMD, "--", link)...)
 	cmd.Dir = config.TMP_PATH
 
 	stdout := &bytes.Buffer{}
@@ -126,7 +132,7 @@ func (YTDLP) DownloadVideo(ctx context.Context, link string) (VideoMeta, error) 
 		return VideoMeta{}, errors.Join(errors.New("Special Links Parser"), err)
 	}
 
-	cmd := exec.Command(ytdlp, append(videoDownloadCMD, link)...)
+	cmd := exec.Command(ytdlp, append(videoDownloadCMD, "--", link)...)
 	cmd.Dir = string(tmpDir)
 
 	stdout := &bytes.Buffer{}
@@ -161,7 +167,7 @@ func (YTDLP) DownloadVideoSmall(ctx context.Context, link string) (VideoMeta, er
 		return VideoMeta{}, errors.Join(errors.New("Special Links Parser"), err)
 	}
 
-	cmd := exec.Command(ytdlp, append(videoDownloadSmallCMD, link)...)
+	cmd := exec.Command(ytdlp, append(videoDownloadSmallCMD, "--", link)...)
 	cmd.Dir = string(tmpDir)
 
 	stdout := &bytes.Buffer{}
@@ -198,7 +204,7 @@ type PlaylistMeta struct {
 }
 
 func (YTDLP) PlaylistInfo(link string) (PlaylistMeta, error) {
-	cmd := exec.Command(ytdlp, append(playlistInfoCMD, link)...)
+	cmd := exec.Command(ytdlp, append(playlistInfoCMD, "--", link)...)
 	cmd.Dir = config.TMP_PATH
 
 	stdout := &bytes.Buffer{}
