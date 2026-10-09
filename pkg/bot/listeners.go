@@ -16,19 +16,23 @@ import (
 	"dbot/pkg/ffmpeg"
 	"dbot/pkg/ytdlp"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 	"github.com/fr-str/log"
 )
 
 func (d *DBot) RegisterEventListiners() {
 	cmdHandlers := d.CommandHandlers()
-	d.AddHandler(d.commands(cmdHandlers))
-	d.AddHandler(d.Ready)
-
-	d.AddHandler(d.messagesListener)
-	d.AddHandler(d.messagesEditListener)
-	d.AddHandler(d.onUserVoiceStateChange)
-	d.AddHandler(d.messageDeleteListener)
+	d.Client.AddEventListeners(
+		bot.NewListenerFunc(d.commands(cmdHandlers)),
+		bot.NewListenerFunc(d.autocomplete),
+		bot.NewListenerFunc(d.Ready),
+		bot.NewListenerFunc(d.messagesListener),
+		bot.NewListenerFunc(d.messagesEditListener),
+		bot.NewListenerFunc(d.onUserVoiceStateChange),
+		bot.NewListenerFunc(d.messageDeleteListener),
+	)
 }
 
 func createContextTmpDir(ctx context.Context) context.Context {
@@ -45,26 +49,24 @@ func createContextTmpDir(ctx context.Context) context.Context {
 	return ctx
 }
 
-func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	return func(s *discordgo.Session, i *discordgo.InteractionCreate) {
-		if h, ok := cmdHandlers[i.ApplicationCommandData().Name]; ok {
+func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(e *events.ApplicationCommandInteractionCreate) {
+	return func(e *events.ApplicationCommandInteractionCreate) {
+		name := e.SlashCommandInteractionData().CommandName()
+		if h, ok := cmdHandlers[name]; ok {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			ctx = createContextTmpDir(ctx)
 
-			err := h(ctx, i)
+			err := h(ctx, e)
 			if err != nil {
 				if errors.Is(err, ErrVoiceDisabled) {
-					d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-						Type: discordgo.InteractionResponseChannelMessageWithSource,
-						Data: &discordgo.InteractionResponseData{
-							Content: "Voice is disabled",
-							Flags:   discordgo.MessageFlagsEphemeral,
-						},
+					e.CreateMessage(discord.MessageCreate{
+						Content: "Voice is disabled",
+						Flags:   discord.MessageFlagEphemeral,
 					})
 					return
 				}
-				log.Error("uuu duuuuuuuuuuuuuuuuuupa", log.Err(err), log.String("cmd", i.ApplicationCommandData().Name), log.String("err_type", fmt.Sprintf("%T", err)))
+				log.Error("uuu duuuuuuuuuuuuuuuuuupa", log.Err(err), log.String("cmd", name), log.String("err_type", fmt.Sprintf("%T", err)))
 
 				msg := err.Error()
 				if errors.Is(err, ytdlp.ErrFailedToDownload) {
@@ -73,7 +75,7 @@ func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(s *discordgo.Ses
 				if len(msg) > 2000 {
 					msg = msg[:2000-1]
 				}
-				_, err := d.ChannelMessageSend(i.ChannelID, msg)
+				_, err := d.Client.Rest.CreateMessage(e.Channel().ID(), discord.MessageCreate{Content: msg})
 				if err != nil {
 					log.Error("response failed", log.Err(err))
 				}
@@ -82,48 +84,58 @@ func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(s *discordgo.Ses
 	}
 }
 
-func (d *DBot) messagesEditListener(_ *discordgo.Session, m *discordgo.MessageUpdate) {
-	if m.Author.Bot {
+func (d *DBot) autocomplete(e *events.AutocompleteInteractionCreate) {
+	if e.Data.CommandName == "load-playlist" {
+		err := d.autocompleteForPlayPlaylist(e)
+		if err != nil {
+			log.Error("autocomplete failed", log.Err(err))
+		}
+	}
+}
+
+func (d *DBot) messagesEditListener(e *events.GuildMessageUpdate) {
+	if e.Message.Author.Bot {
 		return
 	}
 
-	// err := updateBackupMessage(d, m.Message)
+	// err := updateBackupMessage(d, e.Message)
 	// if err != nil {
 	// 	log.Error("updateBackupMessage", log.Err(err))
 	// }
 }
 
-func (d *DBot) messageDeleteListener(_ *discordgo.Session, m *discordgo.MessageDelete) {
+func (d *DBot) messageDeleteListener(e *events.GuildMessageDelete) {
 	err := d.Backup.DeleteArtefact(d.Ctx, backup.DeleteArtefactParams{
-		Gid:   m.GuildID,
-		Chid:  m.ChannelID,
-		Msgid: m.ID,
+		Gid:   e.GuildID.String(),
+		Chid:  e.ChannelID.String(),
+		Msgid: e.MessageID.String(),
 	})
 	if err != nil {
 		log.Error("failed to delete artefact", log.Err(err))
 	}
 }
 
-func (d *DBot) messagesListener(_ *discordgo.Session, m *discordgo.MessageCreate) {
-	info, _, err := BackupAttachment(d, m.Message)
+func (d *DBot) messagesListener(e *events.GuildMessageCreate) {
+	m := e.Message
+	info, _, err := BackupAttachment(d, m)
 	if err == nil && info.PossibleDupe != nil {
-		msg, err := d.ChannelMessageSend(m.ChannelID, fmt.Sprintf(
+		msg, err := d.Client.Rest.CreateMessage(m.ChannelID, discord.MessageCreate{Content: fmt.Sprintf(
 			"Możliwy duplikat https://discord.com/channels/%s/%s/%s",
 			info.PossibleDupe.Gid,
 			info.PossibleDupe.Chid,
 			info.PossibleDupe.Msgid,
-		))
+		)})
 		if err == nil {
 			go func() {
 				time.Sleep(60 * time.Second)
-				d.ChannelMessageDelete(msg.ChannelID, msg.ID)
+				d.Client.Rest.DeleteMessage(msg.ChannelID, msg.ID)
 			}()
 		}
 	}
 	if m.Author.Bot {
 		return
 	}
-	// err := backupMessage(d, m.Message)
+	// err := backupMessage(d, m)
 	// if err != nil {
 	// 	log.Error("backupMessage", log.Err(err))
 	// }
@@ -133,7 +145,7 @@ func (d *DBot) messagesListener(_ *discordgo.Session, m *discordgo.MessageCreate
 	// transcodeToh264(d, m)
 }
 
-func transcodeToh264(d *DBot, m *discordgo.MessageCreate) {
+func transcodeToh264(d *DBot, m discord.Message) {
 	if len(m.Attachments) == 0 {
 		return
 	}
@@ -147,7 +159,7 @@ func transcodeToh264(d *DBot, m *discordgo.MessageCreate) {
 	}
 
 	for _, att := range m.Attachments {
-		if !strings.Contains(att.ContentType, "video") {
+		if att.ContentType == nil || !strings.Contains(*att.ContentType, "video") {
 			continue
 		}
 		meta, err := d.DownloadVideo(ctx, att.URL)
@@ -171,7 +183,7 @@ func transcodeToh264(d *DBot, m *discordgo.MessageCreate) {
 				continue
 			}
 
-			d.MessageReactionAdd(m.ChannelID, m.ID, "bosy:1220157705273086002")
+			d.Client.Rest.AddReaction(m.ChannelID, m.ID, "bosy:1220157705273086002")
 
 			// transcode and upload
 			f, err := ffmpeg.ConvertToMP4(ctx, meta.Filepath, ffmpeg.Clip{})
@@ -181,25 +193,21 @@ func transcodeToh264(d *DBot, m *discordgo.MessageCreate) {
 			}
 			defer f.Close()
 			defer os.Remove(f.Name())
-			msg, err := d.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
-				Files: []*discordgo.File{
-					{
-						Name:        "dupa.mp4",
-						ContentType: "video/mp4",
-						Reader:      f,
-					},
+			msg, err := d.Client.Rest.CreateMessage(m.ChannelID, discord.MessageCreate{
+				Files: []*discord.File{
+					discord.NewFile("dupa.mp4", "", f),
 				},
 			})
 			if err != nil {
 				log.Error("transcodeAndReupload", log.Err(err))
 				return
 			}
-			d.MessageReactionAdd(msg.ChannelID, msg.ID, "skipper:1330256451331031162")
+			d.Client.Rest.AddReaction(msg.ChannelID, msg.ID, "skipper:1330256451331031162")
 		}
 	}
 }
 
-func soundAll(d *DBot, m *discordgo.MessageCreate) {
+func soundAll(d *DBot, m discord.Message) {
 	normalized := normalize(m.Content)
 	if normalized != "sound-all" && normalized != "event-all" {
 		return
@@ -207,7 +215,12 @@ func soundAll(d *DBot, m *discordgo.MessageCreate) {
 
 	log.Debug("sound all", log.String("msg", normalized))
 
-	sounds, err := d.Store.SelectSounds(d.Ctx, m.GuildID)
+	gID := ""
+	if m.GuildID != nil {
+		gID = m.GuildID.String()
+	}
+
+	sounds, err := d.Store.SelectSounds(d.Ctx, gID)
 	if err != nil {
 		log.Error(err.Error())
 		return
@@ -217,7 +230,10 @@ func soundAll(d *DBot, m *discordgo.MessageCreate) {
 		sounds[i], sounds[j] = sounds[j], sounds[i]
 	})
 
-	err = d.connectVoice(m.GuildID, m.Author.ID)
+	if m.GuildID == nil {
+		return
+	}
+	err = d.connectVoice(*m.GuildID, m.Author.ID)
 	if err != nil {
 		log.Error(err.Error())
 		return
@@ -228,11 +244,17 @@ func soundAll(d *DBot, m *discordgo.MessageCreate) {
 	}
 }
 
-func isKnownSound(d *DBot, m *discordgo.MessageCreate) {
+func isKnownSound(d *DBot, m discord.Message) {
 	msg := m.Content
 	normalized := normalize(m.Content)
 	log.Debug("isKnownSound", log.String("msg", msg), log.String("normalized", normalized))
-	sound, err := findSound(d.Store, normalized, m.GuildID)
+
+	gID := ""
+	if m.GuildID != nil {
+		gID = m.GuildID.String()
+	}
+
+	sound, err := findSound(d.Store, normalized, gID)
 	if err != nil {
 		if !errors.Is(err, ErrSoundNotFound) {
 			log.Info("failed to find sound", log.Err(err))
@@ -240,10 +262,13 @@ func isKnownSound(d *DBot, m *discordgo.MessageCreate) {
 		return
 	}
 
-	err = d.connectVoice(m.GuildID, m.Author.ID)
+	if m.GuildID == nil {
+		return
+	}
+	err = d.connectVoice(*m.GuildID, m.Author.ID)
 	if err != nil {
-		if errors.Is(err, ErrVoiceDisabled) && m.ChannelID == "629733112074600469" {
-			d.ChannelMessageSend(m.ChannelID, "Voice is disabled")
+		if errors.Is(err, ErrVoiceDisabled) && m.ChannelID.String() == "629733112074600469" {
+			d.Client.Rest.CreateMessage(m.ChannelID, discord.MessageCreate{Content: "Voice is disabled"})
 			return
 		}
 		log.Error(err.Error())
@@ -259,12 +284,7 @@ func isKnownSound(d *DBot, m *discordgo.MessageCreate) {
 	}
 }
 
-func (d *DBot) onUserVoiceStateChange(_ *discordgo.Session, vs *discordgo.VoiceStateUpdate) {
-	g, _ := d.State.Guild(vs.GuildID)
-	if g == nil {
-		return
-	}
-
+func (d *DBot) onUserVoiceStateChange(e *events.GuildVoiceStateUpdate) {
 	log.Trace("onUserVoiceStateChange", log.Any("d.MusicPlayer.VC == nil", d.MusicPlayer.VC == nil))
 	if d.MusicPlayer.VC == nil {
 		return
@@ -272,12 +292,13 @@ func (d *DBot) onUserVoiceStateChange(_ *discordgo.Session, vs *discordgo.VoiceS
 
 	botChanID := d.MusicPlayer.VCID
 	log.Trace("onUserVoiceStateChange", log.Any("botChanID", botChanID))
+	gID := e.VoiceState.GuildID
 	var botChanUserCount int
-	for _, v := range g.VoiceStates {
-		if v.Member != nil && v.Member.User.Bot {
+	for vs := range d.Client.Caches.VoiceStates(gID) {
+		if member, ok := d.Client.Caches.Member(gID, vs.UserID); ok && member.User.Bot {
 			continue
 		}
-		if v.ChannelID != botChanID {
+		if vs.ChannelID == nil || *vs.ChannelID != botChanID {
 			continue
 		}
 

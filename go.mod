@@ -3,8 +3,10 @@ module dbot
 go 1.26
 
 require (
-	github.com/bwmarrin/discordgo v0.29.0
 	github.com/corona10/goimagehash v1.1.0
+	github.com/disgoorg/disgo v0.19.6
+	github.com/disgoorg/godave/golibdave v0.1.0
+	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/fr-str/env v0.0.0-20240805161223-e2010c5d2e5c
 	github.com/fr-str/log v0.0.0-20250315103416-41f3046ae856
 	github.com/go-co-op/gocron/v2 v2.18.0
@@ -20,8 +22,6 @@ require (
 	modernc.org/sqlite v1.40.0
 )
 
-replace github.com/bwmarrin/discordgo => github.com/yeongaori/discordgo v0.0.0-20260321152711-3d3293e4c765
-
 require (
 	cel.dev/expr v0.25.0 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
@@ -29,10 +29,13 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.40.1 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/coder/websocket v1.8.13 // indirect
 	github.com/cubicdaiya/gonp v1.0.4 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/disgoorg/godave v0.1.0 // indirect
+	github.com/disgoorg/godave/libdave v0.1.0 // indirect
+	github.com/disgoorg/json/v2 v2.0.0 // indirect
+	github.com/disgoorg/omit v1.0.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elastic/go-sysinfo v1.15.4 // indirect
 	github.com/elastic/go-windows v1.0.2 // indirect
@@ -55,7 +58,7 @@ require (
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
-	github.com/klauspost/compress v1.18.1 // indirect
+	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
@@ -81,6 +84,7 @@ require (
 	github.com/riza-io/grpc-go v0.2.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
+	github.com/sasha-s/go-csync v0.0.0-20240107134140-fcbab37b09ad // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect

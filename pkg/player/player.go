@@ -1,6 +1,7 @@
 package player
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -13,7 +14,8 @@ import (
 	"dbot/pkg/config"
 	"dbot/pkg/ytdlp"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/snowflake/v2"
 	"github.com/fr-str/log"
 	"github.com/pion/opus/pkg/oggreader"
 )
@@ -21,7 +23,7 @@ import (
 func (p *Player) playerErr(msg string, vars ...any) Err {
 	return Err{
 		Err: fmt.Errorf("player: "+msg+": %w", vars...),
-		GID: p.VC.GuildID,
+		GID: p.VC.GuildID().String(),
 	}
 }
 
@@ -41,9 +43,9 @@ func (t *Player) PlayPause() {
 type Player struct {
 	ytdlp.YTDLP
 
-	VCID    string
+	VCID    snowflake.ID
 	list    list
-	VC      *discordgo.VoiceConnection
+	VC      voice.Conn
 	ErrChan chan Err
 
 	// play pause
@@ -106,7 +108,7 @@ func (p *Player) PlaySound(link string) {
 func (p *Player) musicLoop() {
 	for a := range p.list.nextAudio {
 		log.Debug("list.nextAudio", log.JSON(a))
-		if len(a.Filepath) == 0 && strings.Contains(a.Link, p.VC.GuildID) {
+		if len(a.Filepath) == 0 && strings.Contains(a.Link, p.VC.GuildID().String()) {
 			a.Filepath = filepath.Join(config.BACKUP_DIR, a.Link)
 		}
 
@@ -149,7 +151,7 @@ func (p *Player) soundLoop() {
 }
 
 func (p *Player) fetch(audio *Audio) error {
-	if strings.Contains(audio.Link, p.VC.GuildID) {
+	if strings.Contains(audio.Link, p.VC.GuildID().String()) {
 		audio.Filepath = filepath.Join(config.BACKUP_DIR, audio.Link)
 		return nil
 	}
@@ -220,8 +222,9 @@ func (p *Player) playV2(audio *Audio) error {
 		return fmt.Errorf("failed to create oggreader from stdout: %w", err)
 	}
 
-	p.VC.Speaking(true)
-	defer p.VC.Speaking(false)
+	ctx := context.Background()
+	p.VC.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
+	defer p.VC.SetSpeaking(ctx, voice.SpeakingFlagNone)
 	for {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
@@ -233,18 +236,11 @@ func (p *Player) playV2(audio *Audio) error {
 
 		for _, frame := range page {
 			p.Lock()
-			select {
-			// case <-p.VC.Dead:
-			// 	p.Unlock()
-			// 	if audio.Filepath == "" {
-			// 		ytdlpCMD.Process.Kill()
-			// 	}
-			// 	ffmpegCMD.Process.Kill()
-			// 	return nil
-
-			case p.VC.OpusSend <- frame:
-			}
+			_, err := p.VC.UDP().Write(frame)
 			p.Unlock()
+			if err != nil {
+				log.Error("failed to write opus frame", log.Err(err))
+			}
 		}
 	}
 
@@ -295,8 +291,9 @@ func (p *Player) playSound(audio *Audio) error {
 		return fmt.Errorf("failed to create oggreader from stdout: %w", err)
 	}
 
-	p.VC.Speaking(true)
-	defer p.VC.Speaking(false)
+	ctx := context.Background()
+	p.VC.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
+	defer p.VC.SetSpeaking(ctx, voice.SpeakingFlagNone)
 	for {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
@@ -307,7 +304,9 @@ func (p *Player) playSound(audio *Audio) error {
 		}
 
 		for _, frame := range page {
-			p.VC.OpusSend <- frame
+			if _, err := p.VC.UDP().Write(frame); err != nil {
+				log.Error("failed to write opus frame", log.Err(err))
+			}
 		}
 	}
 

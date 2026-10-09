@@ -23,9 +23,8 @@ import (
 	"dbot/pkg/backup"
 	"dbot/pkg/config"
 
+	"github.com/disgoorg/disgo/discord"
 	"github.com/fr-str/log"
-
-	"github.com/bwmarrin/discordgo"
 )
 
 func must[T any](v T, err error) T {
@@ -35,7 +34,7 @@ func must[T any](v T, err error) T {
 	return v
 }
 
-func backupMessage(d *DBot, m *discordgo.Message) error {
+func backupMessage(d *DBot, m discord.Message) error {
 	if m.Author.Bot {
 		return nil
 	}
@@ -48,16 +47,16 @@ func backupMessage(d *DBot, m *discordgo.Message) error {
 
 	_, err = d.Backup.UpsertUser(d.Ctx, backup.UpsertUserParams{
 		Username:  m.Author.Username,
-		DiscordID: must(strconv.ParseInt(m.Author.ID, 10, 64)),
+		DiscordID: must(strconv.ParseInt(m.Author.ID.String(), 10, 64)),
 	})
 	if err != nil {
 		return fmt.Errorf("upsert user: %w", err)
 	}
 
 	err = d.Backup.InsertBackup(d.Ctx, backup.InsertBackupParams{
-		MsgID:       must(strconv.ParseInt(m.ID, 10, 64)),
-		AuthorID:    must(strconv.ParseInt(m.Author.ID, 10, 64)),
-		ChannelID:   must(strconv.ParseInt(m.ChannelID, 10, 64)),
+		MsgID:       must(strconv.ParseInt(m.ID.String(), 10, 64)),
+		AuthorID:    must(strconv.ParseInt(m.Author.ID.String(), 10, 64)),
+		ChannelID:   must(strconv.ParseInt(m.ChannelID.String(), 10, 64)),
 		Content:     m.Content,
 		Attachments: attachments,
 		CreatedAt:   time.Now(),
@@ -69,9 +68,9 @@ func backupMessage(d *DBot, m *discordgo.Message) error {
 	return nil
 }
 
-func updateBackupMessage(d *DBot, m *discordgo.Message) error {
+func updateBackupMessage(d *DBot, m discord.Message) error {
 	err := d.Backup.UpdateBackupMsg(d.Ctx, backup.UpdateBackupMsgParams{
-		MsgID:   must(strconv.ParseInt(m.ID, 10, 64)),
+		MsgID:   must(strconv.ParseInt(m.ID.String(), 10, 64)),
 		Content: m.Content,
 	})
 	if err != nil {
@@ -81,9 +80,14 @@ func updateBackupMessage(d *DBot, m *discordgo.Message) error {
 	return nil
 }
 
-func BackupAttachment(d *DBot, m *discordgo.Message) (BackupFile, string, error) {
+func BackupAttachment(d *DBot, m discord.Message) (BackupFile, string, error) {
 	if len(m.Attachments) == 0 {
 		return BackupFile{}, "", nil
+	}
+
+	var gid string
+	if m.GuildID != nil {
+		gid = m.GuildID.String()
 	}
 
 	var info BackupFile
@@ -108,9 +112,9 @@ func BackupAttachment(d *DBot, m *discordgo.Message) (BackupFile, string, error)
 			Dirs:        "attachments",
 			PrependTime: true,
 			OriginUrl:   a.URL,
-			GID:         m.GuildID,
-			CHID:        m.ChannelID,
-			MSGID:       m.ID,
+			GID:         gid,
+			CHID:        m.ChannelID.String(),
+			MSGID:       m.ID.String(),
 			File:        resp.Body,
 		})
 		if err != nil {

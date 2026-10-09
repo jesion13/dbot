@@ -12,7 +12,9 @@ import (
 	"dbot/pkg/ffmpeg"
 	"dbot/pkg/store"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/fr-str/log"
 )
 
@@ -46,189 +48,140 @@ func parseTime(s string) (time.Duration, error) {
 	return d, nil
 }
 
-func (d *DBot) handlePlay(ctx context.Context, i *discordgo.InteractionCreate) error {
-	var opts struct {
-		Link string                       `opt:"link"`
-		Att  *discordgo.MessageAttachment `opt:"file"`
-	}
-
-	err := UnmarshalOptions(d.Session, i.ApplicationCommandData().Options, &opts)
-	if err != nil {
-		return dbotErr("failed to parse args: %w", err)
-	}
-
-	resolved := i.ApplicationCommandData().Resolved
-	if resolved == nil && len(opts.Link) == 0 {
+func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	data := e.SlashCommandInteractionData()
+	url := data.String("link")
+	att, hasAtt := data.OptAttachment("file")
+	if !hasAtt && url == "" {
 		return errors.New("you need to provide link or attachment")
 	}
-
-	url := opts.Link
-	if resolved != nil && len(resolved.Attachments) != 0 {
-		opts.Att = resolved.Attachments[opts.Att.ID]
-		url = opts.Att.URL
+	if hasAtt {
+		url = att.URL
 	}
 
-	err = d.play(i.GuildID, i.Member.User.ID, url)
+	err := d.play(e.GuildID().String(), e.User().ID.String(), url)
 	if err != nil {
 		return err
 	}
 
-	err = d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("added %s", url),
-			// Flags:   discordgo.MessageFlagsSuppressEmbeds,
-		},
+	return e.CreateMessage(discord.MessageCreate{
+		Content: fmt.Sprintf("added %s", url),
 	})
-	return err
 }
 
-func (d *DBot) handleWypierdalaj(ctx context.Context, i *discordgo.InteractionCreate) error {
-	d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "sadge",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
+func (d *DBot) handleWypierdalaj(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	e.CreateMessage(discord.MessageCreate{
+		Content: "sadge",
+		Flags:   discord.MessageFlagEphemeral,
 	})
 
 	d.wypierdalajZVC()
 	return nil
 }
 
-func (d *DBot) handleMapChannel(ctx context.Context, i *discordgo.InteractionCreate) error {
-	var opts struct {
-		Type    string             `opt:"type"`
-		Channel *discordgo.Channel `opt:"channel"`
-	}
-
-	err := UnmarshalOptions(d.Session, i.ApplicationCommandData().Options, &opts)
-	if err != nil {
-		return dbotErr("failed to parse args: %w", err)
-	}
+func (d *DBot) handleMapChannel(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	data := e.SlashCommandInteractionData()
+	channel := data.Channel("channel")
 
 	ch, err := d.mapChannel(store.MapChannelParams{
-		Gid:    i.GuildID,
-		Chid:   opts.Channel.ID,
-		ChName: opts.Channel.Name,
-		Type:   opts.Type,
+		Gid:    e.GuildID().String(),
+		Chid:   channel.ID.String(),
+		ChName: channel.Name,
+		Type:   data.String("type"),
 	})
 	if err != nil {
 		return err
 	}
 
-	d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("Channel <#%s> will be used as '%s' channel", ch.Chid, ch.Type),
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
+	return e.CreateMessage(discord.MessageCreate{
+		Content: fmt.Sprintf("Channel <#%s> will be used as '%s' channel", ch.Chid, ch.Type),
+		Flags:   discord.MessageFlagEphemeral,
 	})
-
-	return nil
 }
 
-func (d *DBot) handlePause(ctx context.Context, i *discordgo.InteractionCreate) error {
-	d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("paused %v", !d.MusicPlayer.Playing.Load()),
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
+func (d *DBot) handlePause(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	err := e.CreateMessage(discord.MessageCreate{
+		Content: fmt.Sprintf("paused %v", !d.MusicPlayer.Playing.Load()),
+		Flags:   discord.MessageFlagEphemeral,
 	})
 	d.MusicPlayer.PlayPause()
-	return nil
+	return err
 }
 
-func (d *DBot) handleSound(ctx context.Context, i *discordgo.InteractionCreate) error {
-	var opts SaveSoundParams
+func (d *DBot) handleSound(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	data := e.SlashCommandInteractionData()
+	opts := SaveSoundParams{
+		Aliases: data.String("aliases"),
+		Link:    strings.TrimSpace(data.String("link")),
+	}
 
-	err := UnmarshalOptions(d.Session, i.ApplicationCommandData().Options, &opts)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal options: %w", err)
+	att, hasAtt := data.OptAttachment("file")
+	if !hasAtt && opts.Link == "" {
+		return errors.New("you need to provide link or attachment")
+	}
+	if hasAtt {
+		opts.Link = att.URL
 	}
 	log.Debug("handleSounds", log.JSON(opts))
 
-	opts.Link = strings.TrimSpace(opts.Link)
-
-	resolved := i.ApplicationCommandData().Resolved
-	if resolved == nil && len(opts.Link) == 0 {
-		return errors.New("you need to provide link or attachment")
-	}
-
-	if resolved != nil && len(resolved.Attachments) != 0 {
-		opts.Link = resolved.Attachments[opts.Att.ID].URL
-	}
-
-	d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("Saving sound '%s'", opts.Link),
-		},
+	err := e.CreateMessage(discord.MessageCreate{
+		Content: fmt.Sprintf("Saving sound '%s'", opts.Link),
 	})
+	if err != nil {
+		return err
+	}
 
-	opts.GID = i.GuildID
+	opts.GID = e.GuildID().String()
 	err = d.SaveSound(ctx, opts)
 	if err != nil {
 		return err
 	}
 
 	msg := fmt.Sprintf("Saved sound '%s', '%s'", strings.Split(opts.Aliases, ",")[0], opts.Link)
-	d.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+	_, err = d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{
 		Content: &msg,
 	})
-	return nil
+	return err
 }
 
-func (d *DBot) handleToMP4(ctx context.Context, i *discordgo.InteractionCreate) error {
-	var opts struct {
-		Link   string                       `opt:"link"`
-		Att    *discordgo.MessageAttachment `opt:"file"`
-		Mute   bool                         `opt:"mute"`
-		Format string                       `opt:"format"`
-		Start  string                       `opt:"start"`
-		End    string                       `opt:"end"`
+func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	data := e.SlashCommandInteractionData()
+	format := data.String("format")
+	if format == "" {
+		format = "mp4"
 	}
-	err := UnmarshalOptions(d.Session, i.ApplicationCommandData().Options, &opts)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal options: %w", err)
-	}
+	mute := data.Bool("mute")
 
-	if opts.Format == "" {
-		opts.Format = "mp4"
-	}
-
+	var err error
 	clip := ffmpeg.Clip{}
-	if opts.Start != "" {
-		clip.Start, err = parseTime(opts.Start)
+	if start := data.String("start"); start != "" {
+		clip.Start, err = parseTime(start)
 		if err != nil {
-			return fmt.Errorf("invalid start time '%s': %w", opts.Start, err)
+			return fmt.Errorf("invalid start time '%s': %w", start, err)
 		}
 	}
-	if opts.End != "" {
-		clip.End, err = parseTime(opts.End)
+	if end := data.String("end"); end != "" {
+		clip.End, err = parseTime(end)
 		if err != nil {
-			return fmt.Errorf("invalid end time '%s': %w", opts.End, err)
+			return fmt.Errorf("invalid end time '%s': %w", end, err)
 		}
 	}
 	if clip.Start > 0 && clip.End > 0 && clip.End <= clip.Start {
 		return fmt.Errorf("end time must be after start time")
 	}
 
-	url := opts.Link
-	resolved := i.ApplicationCommandData().Resolved
-	if resolved != nil && len(resolved.Attachments) != 0 {
-		opts.Att = resolved.Attachments[opts.Att.ID]
-		url = opts.Att.URL
+	url := data.String("link")
+	if att, ok := data.OptAttachment("file"); ok {
+		url = att.URL
 	}
 
-	d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "Working on it, might take some time...",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
+	err = e.CreateMessage(discord.MessageCreate{
+		Content: "Working on it, might take some time...",
+		Flags:   discord.MessageFlagEphemeral,
 	})
+	if err != nil {
+		return err
+	}
 
 	log.Trace("handleToMP4", log.String("url", url))
 
@@ -238,7 +191,7 @@ func (d *DBot) handleToMP4(ctx context.Context, i *discordgo.InteractionCreate) 
 	}
 
 	// if download succeded backup file
-	go saveVideoInDir(d, url, i.GuildID, "tomp4")
+	go saveVideoInDir(d, url, e.GuildID().String(), "tomp4")
 
 	f, err := os.Open(info.Filepath)
 	if err != nil {
@@ -247,7 +200,7 @@ func (d *DBot) handleToMP4(ctx context.Context, i *discordgo.InteractionCreate) 
 	defer f.Close()
 
 	stat, err := f.Stat()
-	log.Trace("handleToMP4", log.String("file", f.Name()), log.Int("size_KB", stat.Size()>>10))
+	log.Trace("handleToMP4", log.String("file", f.Name()), log.Int("size_KB", int(stat.Size()>>10)))
 	if err != nil {
 		return fmt.Errorf("failed getting file size: %w", err)
 	}
@@ -259,11 +212,10 @@ func (d *DBot) handleToMP4(ctx context.Context, i *discordgo.InteractionCreate) 
 	hasHEVCVideo := ffmpeg.HasHEVCVideo(videoInfo)
 
 	// Always convert GIFs and MP4s that exceed the upload limit, need edits, or use HEVC.
-	if opts.Format == "gif" || stat.Size() > ffmpeg.DiscordMaxFileSizeBytes || opts.Mute || clip.Start > 0 || clip.End > 0 || hasHEVCVideo {
-		if opts.Format == "gif" {
-			d.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-				Content: new("converting to GIF..."),
-			})
+	if format == "gif" || stat.Size() > ffmpeg.DiscordMaxFileSizeBytes || mute || clip.Start > 0 || clip.End > 0 || hasHEVCVideo {
+		if format == "gif" {
+			msg := "converting to GIF..."
+			d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{Content: &msg})
 
 			log.Info("converting to GIF")
 
@@ -289,18 +241,16 @@ func (d *DBot) handleToMP4(ctx context.Context, i *discordgo.InteractionCreate) 
 			if stat.Size() > ffmpeg.DiscordMaxFileSizeBytes {
 				reasons = append(reasons, "file too big")
 			}
-			if opts.Mute {
+			if mute {
 				reasons = append(reasons, "mute requested")
 			}
 			if hasHEVCVideo {
 				reasons = append(reasons, "HEVC video codec")
 			}
 			msg := "converting MP4: " + strings.Join(reasons, ", ")
-			d.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-				Content: &msg,
-			})
+			d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{Content: &msg})
 
-			f, err = ffmpeg.ToDiscordMP4(ctx, info.Filepath, opts.Mute, clip)
+			f, err = ffmpeg.ToDiscordMP4(ctx, info.Filepath, mute, clip)
 			if err != nil {
 				return fmt.Errorf("failed converting to MP4: %w", err)
 			}
@@ -308,17 +258,19 @@ func (d *DBot) handleToMP4(ctx context.Context, i *discordgo.InteractionCreate) 
 		}
 	}
 
-	channel, err := d.Session.Channel(i.ChannelID)
+	channel, err := d.Client.Rest.GetChannel(e.Channel().ID())
 	if err != nil {
 		return fmt.Errorf("failed to get channel: %w", err)
 	}
 
-	webhookChannelID := i.ChannelID
-	isThread := channel.Type == discordgo.ChannelTypeGuildNewsThread ||
-		channel.Type == discordgo.ChannelTypeGuildPublicThread ||
-		channel.Type == discordgo.ChannelTypeGuildPrivateThread
+	webhookChannelID := e.Channel().ID()
+	isThread := channel.Type() == discord.ChannelTypeGuildNewsThread ||
+		channel.Type() == discord.ChannelTypeGuildPublicThread ||
+		channel.Type() == discord.ChannelTypeGuildPrivateThread
 	if isThread {
-		webhookChannelID = channel.ParentID
+		if parentID := channel.(discord.GuildThread).ParentID(); parentID != nil {
+			webhookChannelID = *parentID
+		}
 	}
 
 	hook, err := d.GetWebHook(ctx, webhookChannelID, DbotHook, "")
@@ -326,125 +278,80 @@ func (d *DBot) handleToMP4(ctx context.Context, i *discordgo.InteractionCreate) 
 		return fmt.Errorf("getWebhook: %w", err)
 	}
 
-	user, _ := d.GuildMember(i.GuildID, i.Member.User.ID)
-	if user == nil {
-		user = &discordgo.Member{}
+	member := e.Member()
+	username := e.User().EffectiveName()
+	if member != nil {
+		username = member.EffectiveName()
 	}
 
-	// Determine filename and content type based on format
-	var fileName, contentType string
-	if opts.Format == "gif" {
+	// Determine filename based on format; Discord infers rendering from the extension
+	fileName := "dupa.mp4"
+	if format == "gif" {
 		fileName = "dupa.webp"
-		contentType = "image/gif"
-	} else {
-		fileName = "dupa.mp4"
-		contentType = "video/mp4"
 	}
 
-	if isThread {
-		_, err = d.Session.WebhookThreadExecute(hook.ID, hook.Token, false, i.ChannelID, &discordgo.WebhookParams{
-			Username:  user.DisplayName(),
-			AvatarURL: i.Member.User.AvatarURL(""),
-			Files: []*discordgo.File{
-				{
-					Name:        fileName,
-					ContentType: contentType,
-					Reader:      f,
-				},
-			},
-			Flags: discordgo.MessageFlagsSuppressEmbeds,
-		})
-		return err
-	}
-
-	_, err = d.WebhookExecute(hook.ID, hook.Token, false, &discordgo.WebhookParams{
-		Username:  user.DisplayName(),
-		AvatarURL: i.Member.User.AvatarURL(""),
-		Files: []*discordgo.File{
-			{
-				Name:        fileName,
-				ContentType: contentType,
-				Reader:      f,
-			},
+	msgCreate := discord.WebhookMessageCreate{
+		Username:  username,
+		AvatarURL: e.User().EffectiveAvatarURL(),
+		Files: []*discord.File{
+			discord.NewFile(fileName, "", f),
 		},
-		Flags: discordgo.MessageFlagsSuppressEmbeds,
-	})
+		Flags: discord.MessageFlagSuppressEmbeds,
+	}
 
+	params := rest.CreateWebhookMessageParams{Wait: true}
+	if isThread {
+		params.ThreadID = e.Channel().ID()
+	}
+
+	_, err = d.Client.Rest.CreateWebhookMessage(hook.ID(), hook.Token, msgCreate, params)
 	return err
 }
 
-func (d *DBot) savePlaylist(ctx context.Context, i *discordgo.InteractionCreate) error {
-	var opts struct {
-		Name string `opt:"name"`
-		Link string `opt:"yt-link"`
-	}
+func (d *DBot) savePlaylist(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	data := e.SlashCommandInteractionData()
+	name := data.String("name")
+	link := data.String("yt-link")
 
-	err := UnmarshalOptions(d.Session, i.ApplicationCommandData().Options, &opts)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal options: %w", err)
-	}
-
-	d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "Working on it, might take some time...",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
+	err := e.CreateMessage(discord.MessageCreate{
+		Content: "Working on it, might take some time...",
+		Flags:   discord.MessageFlagEphemeral,
 	})
-
-	return d.savePlaylistFromYT(opts.Name, opts.Link, i.GuildID)
-}
-
-func (d *DBot) playPlaylistFromDB(ctx context.Context, i *discordgo.InteractionCreate) error {
-	if isAutocompleteInteraction(i) {
-		return d.autocompleteForPlayPlaylist(i)
-	}
-	var opts struct {
-		Name string `opt:"name"`
-	}
-
-	err := UnmarshalOptions(d.Session, i.ApplicationCommandData().Options, &opts)
-	if err != nil {
-		return fmt.Errorf("failed to unmarshal options: %w", err)
-	}
-
-	err = d.connectVoice(i.GuildID, i.Member.User.ID)
-	if err != nil {
-		return err
-	}
-	err = d.loadPlaylistFromDB(opts.Name, i.GuildID)
 	if err != nil {
 		return err
 	}
 
-	return d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("loading %s", opts.Name),
-		},
+	return d.savePlaylistFromYT(name, link, e.GuildID().String())
+}
+
+func (d *DBot) playPlaylistFromDB(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	data := e.SlashCommandInteractionData()
+	name := data.String("name")
+
+	err := d.connectVoice(*e.GuildID(), e.User().ID)
+	if err != nil {
+		return err
+	}
+	err = d.loadPlaylistFromDB(name, e.GuildID().String())
+	if err != nil {
+		return err
+	}
+
+	return e.CreateMessage(discord.MessageCreate{
+		Content: fmt.Sprintf("loading %s", name),
 	})
 }
 
-func (d *DBot) autocompleteForPlayPlaylist(i *discordgo.InteractionCreate) error {
-	names, err := d.Store.PlaylistNames(d.Ctx, i.GuildID)
+func (d *DBot) autocompleteForPlayPlaylist(e *events.AutocompleteInteractionCreate) error {
+	names, err := d.Store.PlaylistNames(d.Ctx, e.GuildID().String())
 	if err != nil {
 		log.Error("failed getting playlist names", log.Err(err))
 	}
 
-	choices := make([]*discordgo.ApplicationCommandOptionChoice, 0, len(names))
+	choices := make([]discord.AutocompleteChoice, 0, len(names))
 	for _, name := range names {
-		choices = append(choices, &discordgo.ApplicationCommandOptionChoice{Name: name, Value: name})
+		choices = append(choices, discord.AutocompleteChoiceString{Name: name, Value: name})
 	}
 
-	d.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
-		Data: &discordgo.InteractionResponseData{
-			Choices: choices,
-		},
-	})
-	return nil
-}
-
-func isAutocompleteInteraction(i *discordgo.InteractionCreate) bool {
-	return i.Type == discordgo.InteractionApplicationCommandAutocomplete
+	return e.AutocompleteResult(choices)
 }

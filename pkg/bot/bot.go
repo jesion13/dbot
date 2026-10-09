@@ -19,7 +19,10 @@ import (
 	"dbot/pkg/store"
 	"dbot/pkg/ytdlp"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/snowflake/v2"
 	"github.com/fr-str/log"
 )
 
@@ -28,7 +31,8 @@ type DBot struct {
 	Store  *store.Queries
 	Backup *backup.Queries
 
-	*discordgo.Session
+	Client  *bot.Client
+	GuildID snowflake.ID
 	ytdlp.YTDLP
 	// MusicPlayer is for plaing stuff from YT and others
 	MusicPlayer *player.Player
@@ -62,16 +66,16 @@ func startJobRunner(ctx context.Context, db *store.Queries) jobrunner.Runner {
 	return runner
 }
 
-func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries) *DBot {
+func Start(ctx context.Context, client *bot.Client, dbstore *store.Queries) *DBot {
 	backupDB, err := db.ConnectBackup(ctx, "backup.db", "")
 	if err != nil {
 		panic(err)
 	}
 
-	// sess.LogLevel = 3
 	d := DBot{
 		Ctx:         ctx,
-		Session:     sess,
+		Client:      client,
+		GuildID:     snowflake.MustParse(config.GUILD_ID),
 		MusicPlayer: player.NewPlayer(),
 		Store:       dbstore,
 		Backup:      backupDB,
@@ -87,16 +91,14 @@ func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries)
 	d.StartScheduler()
 	d.interfaceLoop()
 
-	err = sess.Open()
+	err = client.OpenGateway(ctx)
 	if err != nil {
 		panic(err)
 	}
 
-	for _, v := range cmds {
-		_, err := sess.ApplicationCommandCreate(sess.State.User.ID, config.GUILD_ID, v)
-		if err != nil {
-			panic(err)
-		}
+	_, err = client.Rest.SetGuildCommands(client.ApplicationID, d.GuildID, cmds)
+	if err != nil {
+		panic(err)
 	}
 
 	go func() {
@@ -129,7 +131,7 @@ func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries)
 				msg = "failed converting to mp4"
 			}
 
-			_, err = d.ChannelMessageSend(chID, msg)
+			_, err = d.Client.Rest.CreateMessage(snowflake.MustParse(chID), discord.MessageCreate{Content: msg})
 			if err != nil {
 				log.Error(err.Error())
 				continue
@@ -142,27 +144,27 @@ func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries)
 
 var ErrVoiceDisabled = errors.New("voice disabled")
 
-func (d *DBot) connectVoice(gID, uID string) error {
+func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 	// return ErrVoiceDisabled
 	// skip if we are already connected
 	if d.MusicPlayer.VC != nil {
 		return nil
 	}
 
-	channel, err := d.getUserVC(d.Session, gID, uID)
+	vs, err := d.getUserVC(gID, uID)
 	if err != nil {
 		return fmt.Errorf("failed to find User VC: %w", err)
 	}
 
-	vc, err := d.ChannelVoiceJoin(gID, channel.ChannelID, false, false)
+	vc := d.Client.VoiceManager.CreateConn(gID)
+	err = vc.Open(d.Ctx, *vs.ChannelID, false, false)
 	if err != nil {
 		return fmt.Errorf("failed to join VC: %w", err)
 	}
 
-	// vc.LogLevel = 3
 	d.MusicPlayer.VC = vc
-	d.MusicPlayer.VCID = channel.ChannelID
-	log.Trace("[dupa]", log.Any("channel.ChannelID", channel.ChannelID))
+	d.MusicPlayer.VCID = *vs.ChannelID
+	log.Trace("[dupa]", log.Any("channel.ChannelID", *vs.ChannelID))
 
 	return nil
 }
@@ -175,11 +177,8 @@ const (
 
 type SaveSoundParams struct {
 	GID     string
-	Aliases string `opt:"aliases"`
-	Link    string `opt:"link"`
-	// after unmarshal only ID field will be populated
-	// if attachment was provided
-	Att *discordgo.MessageAttachment `opt:"file"`
+	Aliases string
+	Link    string
 }
 
 func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
@@ -246,26 +245,19 @@ func (d *DBot) downloadAsMP4(ctx context.Context, url string) (MP4File, error) {
 	}, nil
 }
 
-func (d *DBot) Ready(s *discordgo.Session, e *discordgo.Ready) {
+func (d *DBot) Ready(e *events.Ready) {
 	log.Info("ready")
 }
 
-// returns users VoiceCHannel if user is connected to one
-// errors if guild does not exist and if user is not in voice channel
-func (d *DBot) getUserVC(s *discordgo.Session, gID string, uID string) (*discordgo.VoiceState, error) {
-	g, err := s.State.Guild(gID)
-	if err != nil {
-		return nil, err
+// returns users VoiceState if user is connected to one
+// errors if user is not in voice channel
+func (d *DBot) getUserVC(gID, uID snowflake.ID) (discord.VoiceState, error) {
+	vs, ok := d.Client.Caches.VoiceState(gID, uID)
+	if !ok || vs.ChannelID == nil {
+		return discord.VoiceState{}, fmt.Errorf("user <@%s> in guild '%s' is not in voice channel", uID, gID)
 	}
 
-	for _, vs := range g.VoiceStates {
-		if vs.UserID != uID {
-			continue
-		}
-		return vs, nil
-	}
-
-	return nil, fmt.Errorf("user <@%s> in guild '%s' is not in voice channel", uID, gID)
+	return vs, nil
 }
 
 func (d *DBot) mapChannel(params store.MapChannelParams) (store.Channel, error) {
@@ -279,14 +271,7 @@ func (d *DBot) mapChannel(params store.MapChannelParams) (store.Channel, error) 
 
 func (d *DBot) wypierdalajZVC() error {
 	if d.MusicPlayer.VC != nil {
-		err := d.MusicPlayer.VC.Disconnect()
-		if err != nil {
-			log.Error("failed to disconnect?", log.Err(err))
-			// d.MusicPlayer.ErrChan <- player.Err{
-			// 	GID: gID,
-			// 	Err: err,
-			// }
-		}
+		d.MusicPlayer.VC.Close(d.Ctx)
 	}
 	d.MusicPlayer.Close()
 
@@ -301,7 +286,7 @@ func isValidUrl(s string) bool {
 }
 
 func (d *DBot) play(gID, uID string, url string) error {
-	err := d.connectVoice(gID, uID)
+	err := d.connectVoice(snowflake.MustParse(gID), snowflake.MustParse(uID))
 	if err != nil {
 		return err
 	}

@@ -1,10 +1,7 @@
 package dbot
 
 import (
-	"errors"
-
-	"dbot/pkg/config"
-
+	"github.com/disgoorg/snowflake/v2"
 	"github.com/fr-str/log"
 	"github.com/go-co-op/gocron/v2"
 )
@@ -67,21 +64,21 @@ func (d *DBot) środowaNoc() {
 
 // only used for scheduled events
 func (d *DBot) findVoiceChannel() error {
-	g, _ := d.State.Guild(config.GUILD_ID)
-	if g == nil {
-		return errors.New("dupa")
+	var channelID *snowflake.ID
+	for vs := range d.Client.Caches.VoiceStates(d.GuildID) {
+		channelID = vs.ChannelID
+		break
 	}
-
-	if len(g.VoiceStates) == 0 {
+	if channelID == nil {
 		return nil
 	}
 
-	channelID := g.VoiceStates[0].ChannelID
-	vc, err := d.ChannelVoiceJoin(g.ID, channelID, false, false)
+	vc := d.Client.VoiceManager.CreateConn(d.GuildID)
+	err := vc.Open(d.Ctx, *channelID, false, false)
 	if err != nil {
 		return err
 	}
 	d.MusicPlayer.VC = vc
-	d.MusicPlayer.VCID = channelID
+	d.MusicPlayer.VCID = *channelID
 	return nil
 }

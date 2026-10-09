@@ -8,7 +8,8 @@ import (
 
 	dbot "dbot/pkg/bot"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 	"github.com/fr-str/log"
 )
 
@@ -32,7 +33,7 @@ func StartServer(d *dbot.DBot) {
 			fmt.Fprintf(&msg, "[URL](%s) Points: %s\n", k, v)
 		}
 
-		_, err = d.ChannelMessageSend("983810486627876924", msg.String())
+		_, err = d.Client.Rest.CreateMessage(snowflake.MustParse("983810486627876924"), discord.MessageCreate{Content: msg.String()})
 		if err != nil {
 			log.Error(err.Error())
 		}
@@ -42,23 +43,23 @@ func StartServer(d *dbot.DBot) {
 	http.HandleFunc("/api/init-scrape", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
 		go func() {
-			gID := ""
+			var gID snowflake.ID
 
-			channels, err := d.GuildChannels(gID)
+			channels, err := d.Client.Rest.GetGuildChannels(gID)
 			if err != nil {
 				panic(err)
 			}
 			for _, c := range channels {
-				fmt.Println(c.Name)
+				fmt.Println(c.Name())
 			}
 			for _, ch := range channels {
-				if ch.Type != discordgo.ChannelTypeGuildText {
+				if ch.Type() != discord.ChannelTypeGuildText {
 					continue
 				}
-				log.Trace("[dupa]", log.Any("ch.Name", ch.Name))
-				lastID := ""
+				log.Trace("[dupa]", log.Any("ch.Name", ch.Name()))
+				var lastID snowflake.ID
 				for {
-					msgs, err := d.ChannelMessages(ch.ID, 100, lastID, "", "")
+					msgs, err := d.Client.Rest.GetMessages(ch.ID(), 0, lastID, 0, 100)
 					if err != nil {
 						fmt.Println(err)
 						return
@@ -67,7 +68,7 @@ func StartServer(d *dbot.DBot) {
 						lastID = msgs[len(msgs)-1].ID
 					}
 					for _, msg := range msgs {
-						msg.GuildID = gID
+						msg.GuildID = &gID
 						if len(msg.Attachments) > 0 {
 							dbot.BackupAttachment(d, msg)
 						}
