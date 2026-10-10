@@ -15,7 +15,7 @@ build:
 	docker build -t dbot .
 
 compose:
-	DBOT_TAG=$(filter-out $@,$(MAKECMDGOALS)) docker compose up -d && docker logs dbot-dbot-1 -f
+	DBOT_TAG=$(filter-out $@,$(MAKECMDGOALS)) docker compose up --build -d && docker logs dbot-dbot-1 -f
 
 %:
 	@:

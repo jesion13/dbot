@@ -9,7 +9,6 @@ require (
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/fr-str/env v0.0.0-20240805161223-e2010c5d2e5c
 	github.com/go-co-op/gocron/v2 v2.18.0
-	github.com/matryer/is v1.4.1
 	github.com/minio/minio-go/v7 v7.0.97
 	github.com/paul-mannino/go-fuzzywuzzy v0.0.0-20241117160931-a1769aeb6b21
 	github.com/pion/opus v0.0.0-20251017233908-d37e25a5784d
