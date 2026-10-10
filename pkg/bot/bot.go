@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"dbot/pkg/backup"
 	"dbot/pkg/config"
@@ -157,7 +158,9 @@ func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 	}
 
 	vc := d.Client.VoiceManager.CreateConn(gID)
-	err = vc.Open(d.Ctx, *vs.ChannelID, false, false)
+	openCtx, cancel := context.WithTimeout(d.Ctx, 10*time.Second)
+	defer cancel()
+	err = vc.Open(openCtx, *vs.ChannelID, false, false)
 	if err != nil {
 		return fmt.Errorf("failed to join VC: %w", err)
 	}
