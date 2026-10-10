@@ -9,7 +9,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"dbot/pkg/ffmpeg"
@@ -20,36 +19,6 @@ import (
 	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 )
-
-func parseTime(s string) (time.Duration, error) {
-	if strings.Contains(s, ":") {
-		parts := strings.Split(s, ":")
-		var total time.Duration
-		for i, p := range parts {
-			v, err := strconv.Atoi(p)
-			if err != nil {
-				return 0, err
-			}
-			switch len(parts) - i {
-			case 3:
-				total += time.Duration(v) * time.Hour
-			case 2:
-				total += time.Duration(v) * time.Minute
-			case 1:
-				total += time.Duration(v) * time.Second
-			}
-		}
-		return total, nil
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		d, err = time.ParseDuration(s + "s")
-		if err != nil {
-			return 0, err
-		}
-	}
-	return d, nil
-}
 
 // ErrInteractionAnswered means the interaction was already acknowledged, so the
 // generic error path in listeners.go must not send a second initial response. It is
@@ -361,13 +330,13 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 	var err error
 	clip := ffmpeg.Clip{}
 	if start := data.String("start"); start != "" {
-		clip.Start, err = parseTime(start)
+		clip.Start, err = ffmpeg.ParseTime(start)
 		if err != nil {
 			return fmt.Errorf("invalid start time '%s': %w", start, err)
 		}
 	}
 	if end := data.String("end"); end != "" {
-		clip.End, err = parseTime(end)
+		clip.End, err = ffmpeg.ParseTime(end)
 		if err != nil {
 			return fmt.Errorf("invalid end time '%s': %w", end, err)
 		}

@@ -46,21 +46,15 @@ func (q *Queries) GetArtefact(ctx context.Context, originUrl string) (Artefact, 
 }
 
 const getArtefacts = `-- name: GetArtefacts :many
-SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid FROM artefacts 
-WHERE 
-    media_type in ('image/jpg','image/png') 
-AND 
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid FROM artefacts
+WHERE
+    media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+AND
     gid = ?
-ORDER BY created_at DESC LIMIT 100 OFFSET ?
 `
 
-type GetArtefactsParams struct {
-	Gid    string
-	Offset int64
-}
-
-func (q *Queries) GetArtefacts(ctx context.Context, arg GetArtefactsParams) ([]Artefact, error) {
-	rows, err := q.db.QueryContext(ctx, getArtefacts, arg.Gid, arg.Offset)
+func (q *Queries) GetArtefacts(ctx context.Context, gid string) ([]Artefact, error) {
+	rows, err := q.db.QueryContext(ctx, getArtefacts, gid)
 	if err != nil {
 		return nil, err
 	}

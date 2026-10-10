@@ -35,12 +35,6 @@ var (
 	FFMPEG_HW_ACCEL bool
 
 	BACKUP_DIR string
-
-	// minio
-	MINIO_HOST              string
-	MINIO_ACCESS_KEY_ID     string
-	MINIO_SECRET_ACCESS_KEY string
-	MINIO_DBOT_BUCKET_NAME  string
 )
 
 func Load() {

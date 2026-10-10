@@ -51,7 +51,7 @@ func (d *DBot) playlistInfo(link string) (ytdlp.PlaylistMeta, error) {
 }
 
 func dbotErr(msg string, vars ...any) error {
-	return fmt.Errorf("dbot: "+msg+": ", vars...)
+	return fmt.Errorf("dbot: "+msg, vars...)
 }
 
 var normalizeReplacer = strings.NewReplacer(

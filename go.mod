@@ -6,15 +6,14 @@ require (
 	github.com/corona10/goimagehash v1.1.0
 	github.com/disgoorg/disgo v0.19.6
 	github.com/disgoorg/godave/golibdave v0.1.0
+	github.com/disgoorg/omit v1.0.0
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/fr-str/env v0.0.0-20240805161223-e2010c5d2e5c
 	github.com/go-co-op/gocron/v2 v2.18.0
-	github.com/minio/minio-go/v7 v7.0.97
 	github.com/paul-mannino/go-fuzzywuzzy v0.0.0-20241117160931-a1769aeb6b21
 	github.com/pion/opus v0.0.0-20251017233908-d37e25a5784d
 	github.com/pressly/goose/v3 v3.26.0
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546
 	golang.org/x/image v0.34.0
 	golang.org/x/net v0.49.0
 	modernc.org/sqlite v1.40.0
@@ -33,14 +32,12 @@ require (
 	github.com/disgoorg/godave v0.1.0 // indirect
 	github.com/disgoorg/godave/libdave v0.1.0 // indirect
 	github.com/disgoorg/json/v2 v2.0.0 // indirect
-	github.com/disgoorg/omit v1.0.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/elastic/go-sysinfo v1.15.4 // indirect
 	github.com/elastic/go-windows v1.0.2 // indirect
 	github.com/fatih/structtag v1.2.0 // indirect
 	github.com/go-faster/city v1.0.1 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
-	github.com/go-ini/ini v1.67.0 // indirect
 	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.2 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
@@ -57,20 +54,15 @@ require (
 	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect
-	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
-	github.com/klauspost/crc32 v1.3.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/mfridman/xflag v0.1.0 // indirect
 	github.com/microsoft/go-mssqldb v1.9.2 // indirect
-	github.com/minio/crc64nvme v1.1.0 // indirect
-	github.com/minio/md5-simd v1.1.2 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/paulmach/orb v0.12.0 // indirect
 	github.com/pganalyze/pg_query_go/v6 v6.1.0 // indirect
-	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/pingcap/errors v0.11.5-0.20250523034308-74f78ae071ee // indirect
 	github.com/pingcap/failpoint v0.0.0-20240528011301-b51a646c7c86 // indirect
@@ -81,7 +73,6 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/riza-io/grpc-go v0.2.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
-	github.com/rs/xid v1.6.0 // indirect
 	github.com/sasha-s/go-csync v0.0.0-20240107134140-fcbab37b09ad // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
@@ -91,7 +82,6 @@ require (
 	github.com/sqlc-dev/sqlc v1.29.0 // indirect
 	github.com/stoewer/go-strcase v1.3.1 // indirect
 	github.com/tetratelabs/wazero v1.10.0 // indirect
-	github.com/tinylib/msgp v1.5.0 // indirect
 	github.com/tursodatabase/libsql-client-go v0.0.0-20240902231107-85af5b9d094d // indirect
 	github.com/vertica/vertica-sql-go v1.3.3 // indirect
 	github.com/wasilibs/go-pgquery v0.0.0-20250409022910-10ac41983c07 // indirect
@@ -105,6 +95,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
+	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect

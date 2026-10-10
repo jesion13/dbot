@@ -13,7 +13,6 @@ import (
 
 	migrations "dbot/db"
 	"dbot/pkg/backup"
-	"dbot/pkg/cache"
 	"dbot/pkg/config"
 	dbotlog "dbot/pkg/logger"
 	"dbot/pkg/store"
@@ -30,31 +29,6 @@ func (s db) configure() {
 	// s.r.SetMaxOpenConns(100)
 	// s.r.SetConnMaxLifetime(5 * time.Minute)
 	// s.r.SetMaxIdleConns(2)
-}
-
-func ConnectAudioCache(ctx context.Context, filename string, schema string) (*cache.Queries, error) {
-	w, err := sql.Open("sqlite", filepath.Join(config.TMP_PATH, filename))
-	if err != nil {
-		return nil, err
-	}
-	go func() {
-		<-ctx.Done()
-		w.Close()
-	}()
-
-	// create tables
-	goose.SetBaseFS(migrations.CacheMigrations)
-	goose.SetDialect("sqlite3")
-	err = goose.UpContext(ctx, w, "cache")
-	if err != nil {
-		panic(err)
-	}
-
-	d := db{
-		w: w,
-	}
-	d.configure()
-	return cache.New(d), nil
 }
 
 func ConnectStore(ctx context.Context, filename string, schema string) (*Store, error) {
@@ -86,7 +60,7 @@ func ConnectStore(ctx context.Context, filename string, schema string) (*Store, 
 		panic(err)
 	}
 
-	_, err = w.ExecContext(ctx, "PRAGMA synchronus=NORMAL")
+	_, err = w.ExecContext(ctx, "PRAGMA synchronous=NORMAL")
 	if err != nil {
 		panic(err)
 	}
@@ -148,7 +122,7 @@ func ConnectBackup(ctx context.Context, filename, password string) (*backup.Quer
 		panic(err)
 	}
 
-	_, err = w.ExecContext(ctx, "PRAGMA synchronus=NORMAL")
+	_, err = w.ExecContext(ctx, "PRAGMA synchronous=NORMAL")
 	if err != nil {
 		panic(err)
 	}

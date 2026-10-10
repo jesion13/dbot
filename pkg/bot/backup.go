@@ -198,31 +198,24 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 
 func (d *DBot) checkHashAgainstDB(gid string, hash uint64) (art backup.Artefact, unique bool) {
 	hash1 := goimagehash.NewExtImageHash([]uint64{hash}, goimagehash.DHash, 64)
-	offset := int64(0)
-	do := true
-	for do {
-		data, err := d.Backup.GetArtefacts(d.Ctx, backup.GetArtefactsParams{
-			Gid:    gid,
-			Offset: offset,
-		})
-		if err != nil {
-			slog.Error("failed to get Artiefacts", slog.Any("error", err))
-			return backup.Artefact{}, true
-		}
-		for _, d := range data {
-			hash2 := goimagehash.NewExtImageHash([]uint64{uint64(d.Hash)}, goimagehash.DHash, 64)
-			dist, err := hash1.Distance(hash2)
-			if err != nil {
-				slog.Error("failed to calc distance", slog.Any("error", err))
-			}
-			if dist <= 3 {
-				slog.Debug("[dupa]", slog.Any("dist", dist))
-				return d, false
-			}
-		}
 
-		do = len(data) == 100
-		offset += 100
+	data, err := d.Backup.GetArtefacts(d.Ctx, gid)
+	if err != nil {
+		slog.Error("failed to get Artiefacts", slog.Any("error", err))
+		return backup.Artefact{}, true
+	}
+
+	for _, a := range data {
+		hash2 := goimagehash.NewExtImageHash([]uint64{uint64(a.Hash)}, goimagehash.DHash, 64)
+		dist, err := hash1.Distance(hash2)
+		if err != nil {
+			slog.Error("failed to calc distance", slog.Any("error", err))
+			continue
+		}
+		if dist <= 3 {
+			slog.Debug("[dupa]", slog.Any("dist", dist))
+			return a, false
+		}
 	}
 
 	return backup.Artefact{}, true
@@ -231,7 +224,6 @@ func (d *DBot) checkHashAgainstDB(gid string, hash uint64) (art backup.Artefact,
 func generateHash(content string, f io.Reader) (uint64, error) {
 	var img image.Image
 	var err error
-	fmt.Println(content)
 	switch content {
 	case PNG:
 		img, err = png.Decode(f)

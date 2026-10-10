@@ -250,7 +250,9 @@ func formatDurationForFFmpeg(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", minutes, seconds)
 }
 
-func parseTime(s string) (time.Duration, error) {
+// ParseTime reads a user-typed clip offset. It accepts "90", "90s", "2m30s",
+// "1:30" and "1:30:45".
+func ParseTime(s string) (time.Duration, error) {
 	if strings.Contains(s, ":") {
 		parts := strings.Split(s, ":")
 		var total time.Duration

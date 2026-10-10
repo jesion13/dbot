@@ -12,18 +12,6 @@ sql:
             go_type: 
               import: "dbot/pkg/db/types"
               type: "Aliases"
-  - schema: "./db/cache/"
-    queries: "./db/cache-queries/query-audio-cache.sql"
-    engine: "sqlite"
-    gen:
-      go:
-        package: "cache"
-        out: "pkg/cache"
-        overrides:
-          - db_type: "Aliases"
-            go_type: 
-              import: "dbot/pkg/db/types"
-              type: "Aliases"
   - schema: "./db/backup/"
     queries: "./db/backup-queries/backup-queries.sql"
     engine: "sqlite"

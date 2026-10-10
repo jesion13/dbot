@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"dbot/pkg/backup"
 	"dbot/pkg/config"
-	"dbot/pkg/ffmpeg"
 	"dbot/pkg/ytdlp"
 
 	"github.com/disgoorg/disgo/bot"
@@ -139,69 +137,6 @@ func (d *DBot) messagesListener(e *events.GuildMessageCreate) {
 
 	isKnownSound(d, m)
 	soundAll(d, m)
-	// transcodeToh264(d, m)
-}
-
-func transcodeToh264(d *DBot, m discord.Message) {
-	if len(m.Attachments) == 0 {
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	ctx = createContextTmpDir(ctx)
-	defer cancel()
-	badCodecs := []string{
-		"hevc",
-		"av1",
-		"h265",
-	}
-
-	for _, att := range m.Attachments {
-		if att.ContentType == nil || !strings.Contains(*att.ContentType, "video") {
-			continue
-		}
-		meta, err := d.DownloadVideo(ctx, att.URL)
-		if err != nil {
-			slog.Error(err.Error())
-			continue
-		}
-
-		videoInfo, err := ffmpeg.Probe(meta.Filepath)
-		if err != nil {
-			slog.Error(err.Error())
-			continue
-		}
-		for i := range videoInfo.Streams {
-			s := &videoInfo.Streams[i]
-			if s.CodecType != "video" {
-				continue
-			}
-
-			if !slices.Contains(badCodecs, s.CodecName) {
-				continue
-			}
-
-			d.Client.Rest.AddReaction(m.ChannelID, m.ID, "bosy:1220157705273086002")
-
-			// transcode and upload
-			f, err := ffmpeg.ConvertToMP4(ctx, meta.Filepath, ffmpeg.Clip{})
-			if err != nil {
-				slog.Error("transcodeAndReupload", slog.Any("error", err))
-				return
-			}
-			defer f.Close()
-			defer os.Remove(f.Name())
-			msg, err := d.Client.Rest.CreateMessage(m.ChannelID, discord.MessageCreate{
-				Files: []*discord.File{
-					discord.NewFile("dupa.mp4", "", f),
-				},
-			})
-			if err != nil {
-				slog.Error("transcodeAndReupload", slog.Any("error", err))
-				return
-			}
-			d.Client.Rest.AddReaction(msg.ChannelID, msg.ID, "skipper:1330256451331031162")
-		}
-	}
 }
 
 func soundAll(d *DBot, m discord.Message) {

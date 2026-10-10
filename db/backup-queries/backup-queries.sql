@@ -24,12 +24,11 @@ SET path = :path,
 WHERE origin_url = :origin_url;
 
 -- name: GetArtefacts :many
-SELECT * FROM artefacts 
-WHERE 
-    media_type in ('image/jpg','image/png') 
-AND 
-    gid = ?
-ORDER BY created_at DESC LIMIT 100 OFFSET :offset;
+SELECT * FROM artefacts
+WHERE
+    media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+AND
+    gid = ?;
 
 -- name: DeleteArtefact :exec
 DELETE FROM artefacts WHERE gid = :gid AND chid = :chid and msgid = :msgid;

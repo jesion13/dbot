@@ -11,49 +11,49 @@ import (
 func TestParseTime(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		t.Run("parses seconds only", func(t *testing.T) {
-			d, err := parseTime("90")
+			d, err := ParseTime("90")
 			require.NoError(t, err)
 			assert.Equal(t, 90*time.Second, d)
 		})
 
 		t.Run("parses with s suffix", func(t *testing.T) {
-			d, err := parseTime("60s")
+			d, err := ParseTime("60s")
 			require.NoError(t, err)
 			assert.Equal(t, 60*time.Second, d)
 		})
 
 		t.Run("parses standard go duration format", func(t *testing.T) {
-			d, err := parseTime("2m30s")
+			d, err := ParseTime("2m30s")
 			require.NoError(t, err)
 			assert.Equal(t, 150*time.Second, d)
 		})
 
 		t.Run("parses minutes only with s suffix", func(t *testing.T) {
-			d, err := parseTime("5m")
+			d, err := ParseTime("5m")
 			require.NoError(t, err)
 			assert.Equal(t, 5*time.Minute, d)
 		})
 
 		t.Run("parses zero", func(t *testing.T) {
-			d, err := parseTime("0")
+			d, err := ParseTime("0")
 			require.NoError(t, err)
 			assert.Equal(t, time.Duration(0), d)
 		})
 
 		t.Run("parses decimal seconds", func(t *testing.T) {
-			d, err := parseTime("1.5")
+			d, err := ParseTime("1.5")
 			require.NoError(t, err)
 			assert.Equal(t, 1500*time.Millisecond, d)
 		})
 
 		t.Run("parses MM:SS format", func(t *testing.T) {
-			d, err := parseTime("1:30")
+			d, err := ParseTime("1:30")
 			require.NoError(t, err)
 			assert.Equal(t, 90*time.Second, d)
 		})
 
 		t.Run("parses HH:MM:SS format", func(t *testing.T) {
-			d, err := parseTime("1:30:45")
+			d, err := ParseTime("1:30:45")
 			require.NoError(t, err)
 			assert.Equal(t, 1*time.Hour+30*time.Minute+45*time.Second, d)
 		})
@@ -61,17 +61,17 @@ func TestParseTime(t *testing.T) {
 
 	t.Run("fail", func(t *testing.T) {
 		t.Run("invalid format", func(t *testing.T) {
-			_, err := parseTime("invalid")
+			_, err := ParseTime("invalid")
 			assert.Error(t, err)
 		})
 
 		t.Run("empty string", func(t *testing.T) {
-			_, err := parseTime("")
+			_, err := ParseTime("")
 			assert.Error(t, err)
 		})
 
 		t.Run("invalid colon format", func(t *testing.T) {
-			_, err := parseTime("1:abc")
+			_, err := ParseTime("1:abc")
 			assert.Error(t, err)
 		})
 	})
