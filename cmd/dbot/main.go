@@ -40,7 +40,7 @@ func main() {
 
 func bot(ctx context.Context, db *store.Queries) {
 	client, err := disgo.New(config.TOKEN,
-		disgobot.WithLogger(slog.Default()),
+		disgobot.WithLogger(logger.New(os.Stdout, slog.LevelWarn)),
 		disgobot.WithEventManagerConfigOpts(
 			disgobot.WithAsyncEventsEnabled(),
 		),
