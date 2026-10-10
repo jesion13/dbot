@@ -34,7 +34,7 @@ func TestFindSound(t *testing.T) {
 		wantAlias string
 	}{
 		{"exact", "honk", "honk"},
-		{"prefix", "hej", "hejnalmariacki"},
+		{"prefix", "hejn", "hejnał"}, // shorter alias wins prefix ties over "hejnalmariacki"
 		{"typo", "honkk", "honk"},
 		{"multi-alias contains", "cymbal", "cymbal"},
 	}

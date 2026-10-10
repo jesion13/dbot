@@ -76,13 +76,14 @@ const (
 )
 
 // matchScore ranks alias against name: exact > prefix > contains > fuzzy typo tolerance.
-// Longer aliases win ties within prefix/contains so "cymbal" beats a shorter false prefix.
+// Prefix ties favor the shorter alias (closest completion of what was typed).
+// Contains ties favor the longer alias (more exact substring coverage).
 func matchScore(alias, name string) int {
 	if alias == name {
 		return 1000
 	}
 	if len(name) >= minPrefixLen && strings.HasPrefix(alias, name) {
-		return 200 + len(alias)
+		return 500 - len(alias)
 	}
 	if len(name) >= minContainsLen && strings.Contains(alias, name) {
 		return 150 + len(alias)
