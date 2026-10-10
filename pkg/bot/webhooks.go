@@ -3,60 +3,58 @@ package dbot
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 const DbotHook = "dbot/hook"
 
-func (b *DBot) GetWebHook(ctx context.Context, chID, name, avatarURL string) (*discordgo.Webhook, error) {
-	hooks, err := b.ChannelWebhooks(chID)
+func (b *DBot) GetWebHook(ctx context.Context, chID snowflake.ID, name, avatarURL string) (*discord.IncomingWebhook, error) {
+	hooks, err := b.Client.Rest.GetWebhooks(chID)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, hook := range hooks {
-		if hook.Name == name {
-			return hook, nil
+		if hook.Name() == name {
+			if incoming, ok := hook.(discord.IncomingWebhook); ok {
+				return &incoming, nil
+			}
 		}
 	}
 
-	if avatarURL == "" {
-		return b.WebhookCreate(chID, name, "")
+	create := discord.WebhookCreate{Name: name}
+	if avatarURL != "" {
+		icon, err := imageData(avatarURL)
+		if err != nil {
+			return nil, err
+		}
+		create.Avatar = icon
 	}
 
-	avatar, err := imageData(avatarURL, "png")
-	if err != nil {
-		return nil, err
-	}
-	return b.WebhookCreate(chID, name, avatar)
+	return b.Client.Rest.CreateWebhook(chID, create)
 }
 
-func imageData(url, imageFormat string) (string, error) {
+func imageData(url string) (*discord.Icon, error) {
 	resp, err := http.Get(url)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	encoded := &bytes.Buffer{}
-	n := int(resp.ContentLength)
-	encoded.Grow((n + 2 - ((n + 2) % 3)) / 3 * 4)
-
-	enc := base64.NewEncoder(base64.StdEncoding, encoded)
-	_, err = enc.Write(data)
+	iconType := discord.IconType(http.DetectContentType(data))
+	icon, err := discord.NewIcon(iconType, bytes.NewReader(data))
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("failed to build icon: %w", err)
 	}
-	enc.Close()
-	return fmt.Sprintf("data:image/%s;base64,%s", imageFormat, encoded.String()), nil
+	return icon, nil
 }

@@ -3,13 +3,14 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	dbot "dbot/pkg/bot"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/fr-str/log"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 func StartServer(d *dbot.DBot) {
@@ -17,14 +18,14 @@ func StartServer(d *dbot.DBot) {
 		links := make(map[string]string)
 		err := json.NewDecoder(r.Body).Decode(&links)
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 			return
 		}
 		if len(links) == 0 {
-			log.Error("no links")
+			slog.Error("no links")
 			return
 		}
-		log.Trace("links", log.JSON(links))
+		slog.Debug("links", slog.Any("links", links))
 
 		var msg strings.Builder
 		msg.WriteString("New	links:\n")
@@ -32,9 +33,9 @@ func StartServer(d *dbot.DBot) {
 			fmt.Fprintf(&msg, "[URL](%s) Points: %s\n", k, v)
 		}
 
-		_, err = d.ChannelMessageSend("983810486627876924", msg.String())
+		_, err = d.Client.Rest.CreateMessage(snowflake.MustParse("983810486627876924"), discord.MessageCreate{Content: msg.String()})
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -43,23 +44,23 @@ func StartServer(d *dbot.DBot) {
 		w.Write([]byte("ok"))
 		return
 		go func() {
-			gID := ""
+			var gID snowflake.ID
 
-			channels, err := d.GuildChannels(gID)
+			channels, err := d.Client.Rest.GetGuildChannels(gID)
 			if err != nil {
 				panic(err)
 			}
 			for _, c := range channels {
-				fmt.Println(c.Name)
+				fmt.Println(c.Name())
 			}
 			for _, ch := range channels {
-				if ch.Type != discordgo.ChannelTypeGuildText {
+				if ch.Type() != discord.ChannelTypeGuildText {
 					continue
 				}
-				log.Trace("[dupa]", log.Any("ch.Name", ch.Name))
-				lastID := ""
+				slog.Debug("[dupa]", slog.Any("ch.Name", ch.Name()))
+				var lastID snowflake.ID
 				for {
-					msgs, err := d.ChannelMessages(ch.ID, 100, lastID, "", "")
+					msgs, err := d.Client.Rest.GetMessages(ch.ID(), 0, lastID, 0, 100)
 					if err != nil {
 						fmt.Println(err)
 						return
@@ -68,7 +69,7 @@ func StartServer(d *dbot.DBot) {
 						lastID = msgs[len(msgs)-1].ID
 					}
 					for _, msg := range msgs {
-						msg.GuildID = gID
+						msg.GuildID = &gID
 						if len(msg.Attachments) > 0 {
 							dbot.BackupAttachment(d, msg)
 						}
@@ -78,14 +79,14 @@ func StartServer(d *dbot.DBot) {
 					}
 				}
 			}
-			log.Info("DONE")
+			slog.Info("DONE")
 		}()
 	})
 	go func() {
-		log.Info("starting server: http://localhost:58008")
+		slog.Info("starting server: http://localhost:58008")
 		err := http.ListenAndServe(":58008", nil)
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 		}
 	}()
 }

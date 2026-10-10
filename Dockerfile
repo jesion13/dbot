@@ -3,6 +3,16 @@
 ARG GO_VERSION=1.26
 FROM golang:${GO_VERSION} AS build
 WORKDIR /src
+ENV PKG_CONFIG_PATH="" LD_LIBRARY_PATH=""
+
+# libdave (Discord DAVE E2EE voice encryption) is a CGO dependency of
+# github.com/disgoorg/godave/libdave; install the native shared lib + headers.
+ARG LIBDAVE_VERSION=v1.1.0
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip && rm -rf /var/lib/apt/lists/*
+ADD https://raw.githubusercontent.com/disgoorg/godave/master/scripts/libdave_install.sh /tmp/libdave_install.sh
+RUN chmod +x /tmp/libdave_install.sh && SHELL=/bin/sh NON_INTERACTIVE=1 /tmp/libdave_install.sh "${LIBDAVE_VERSION}"
+ENV PKG_CONFIG_PATH="/root/.local/lib/pkgconfig:${PKG_CONFIG_PATH}"
+ENV LD_LIBRARY_PATH="/root/.local/lib:${LD_LIBRARY_PATH}"
 
 # Download dependencies as a separate step to take advantage of Docker's caching.
 # Leverage a cache mount to /go/pkg/mod/ to speed up subsequent builds.
@@ -18,7 +28,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     --mount=type=bind,source=.,target=. \
-    CGO_ENABLED=0 go build -trimpath -o /bin/dbot ./cmd/dbot
+    CGO_ENABLED=1 go build -trimpath -o /bin/dbot ./cmd/dbot
 
 ################################################################################
 FROM archlinux:latest AS final
@@ -39,7 +49,8 @@ RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && \
 
 WORKDIR /dbot
 COPY --from=build /bin/dbot .
-RUN chmod +x ./dbot
+COPY --from=build /root/.local/lib/libdave.so /usr/lib/libdave.so
+RUN chmod +x ./dbot && ldconfig
 
 # CMD [ "sleep","90900900" ]
 CMD [ "/dbot/dbot" ]

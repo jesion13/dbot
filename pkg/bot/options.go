@@ -1,139 +1,13 @@
 package dbot
 
 import (
-	"fmt"
 	"net/http"
 	"reflect"
 	"strconv"
-	"strings"
 	"unsafe"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/fr-str/log"
 	"golang.org/x/exp/constraints"
 )
-
-var (
-	prefix                             = "unmarshal form:"
-	ErrUnmarshalFormUnsupported        = fmt.Errorf("%s unsupported type", prefix)
-	ErrUnmarshalFormInvalidDest        = fmt.Errorf("%s dest is nil or not a pointer", prefix)
-	ErrUnmarshalFormFailedToParseValue = fmt.Errorf("%s failed to parse value", prefix)
-)
-
-// Simple function to unmarshal form/query values to struct.
-// Dest has to be a pointer.
-// Supports:
-//   - string
-//   - all int, uint variants.
-//   - int/string slices
-//
-// if discordgo.Attachment is provided ony ID is populated in struct
-func UnmarshalOptions(sess *discordgo.Session, options []*discordgo.ApplicationCommandInteractionDataOption, dest any) error {
-	// check if dest is valid
-	rv := reflect.ValueOf(dest)
-	if rv.Kind() != reflect.Pointer || rv.IsNil() {
-		return ErrUnmarshalFormInvalidDest
-	}
-
-	for i := range options {
-		tagName := options[i].Name
-		option := options[i]
-
-		rv := reflect.ValueOf(dest).Elem()
-		// find field for tag
-		fieldIndex := findFieldByTagValue(rv, tagName)
-		if fieldIndex == -1 {
-			log.Debug("field not found for tag", log.String("tag", tagName))
-			continue
-		}
-
-		// handle pointer
-		field := rv.Field(fieldIndex)
-		if field.Kind() == reflect.Pointer {
-			if field.IsNil() {
-				field.Set(reflect.New(field.Type().Elem()))
-			}
-
-			field = field.Elem()
-		}
-
-		// parse and set value
-		switch field.Kind() {
-		case reflect.Slice:
-			sl := strings.Split(option.StringValue(), ",")
-			err := fillSlice(field, sl)
-			if err != nil {
-				return err
-			}
-
-		case reflect.Struct:
-			switch field.Type().Name() {
-			case "Channel":
-				chPtr := (*discordgo.Channel)(unsafe.Pointer(field.UnsafeAddr()))
-				*chPtr = *option.ChannelValue(sess)
-			case "MessageAttachment":
-				idPtr := (*string)(unsafe.Pointer(field.FieldByName("ID").UnsafeAddr()))
-				*idPtr = option.Value.(string)
-
-			default:
-				log.Error("unknown type", log.String("type", field.Type().Name()))
-			}
-			// discordgo.Channel
-
-		case reflect.String:
-			field.SetString(option.StringValue())
-
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-			field.SetInt(option.IntValue())
-
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-			field.SetUint(option.UintValue())
-
-		case reflect.Bool:
-			field.SetBool(option.BoolValue())
-		}
-	}
-
-	return nil
-}
-
-// takes address of slice and puts data from 'fieldValue' into it
-// handles parsing ~int
-func fillSlice(rv reflect.Value, fieldValue []string) error {
-	typ := rv.Type().Elem()
-	switch typ.Kind() {
-	case reflect.String:
-		slPtr := (*[]string)(unsafe.Pointer(rv.UnsafeAddr()))
-		*slPtr = fieldValue
-
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		slice := reflect.MakeSlice(rv.Type(), 0, len(fieldValue))
-		for _, v := range fieldValue {
-			i, err := strconv.Atoi(v)
-			if err != nil {
-				return err
-			}
-
-			x := reflect.ValueOf(i).Convert(typ)
-			slice = reflect.Append(slice, x)
-		}
-
-		rv.Set(slice)
-	}
-
-	return nil
-}
-
-func findFieldByTagValue(rv reflect.Value, tagName string) int {
-	for i := 0; i < rv.NumField(); i++ {
-		field := rv.Type().Field(i)
-		tag := field.Tag.Get("opt")
-		if tag == tagName {
-			return i
-		}
-	}
-	return -1
-}
 
 // gets value from path value under given key and attempts to convert to given type
 func GetPathValue[T constraints.Integer | string](r *http.Request, key string) (T, error) {
@@ -141,7 +15,7 @@ func GetPathValue[T constraints.Integer | string](r *http.Request, key string) (
 	return CastAs[T](val)
 }
 
-// gets value from path value under given key and attempts to convert to given type
+// gets value from form value under given key and attempts to convert to given type
 // returns no error if value under key is empty string
 func GetFormValue[T constraints.Integer | string](r *http.Request, key string) (T, error) {
 	var def T

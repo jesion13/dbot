@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"dbot/pkg/backup"
 	"dbot/pkg/config"
@@ -19,8 +21,10 @@ import (
 	"dbot/pkg/store"
 	"dbot/pkg/ytdlp"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/fr-str/log"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 type DBot struct {
@@ -28,7 +32,8 @@ type DBot struct {
 	Store  *store.Queries
 	Backup *backup.Queries
 
-	*discordgo.Session
+	Client  *bot.Client
+	GuildID snowflake.ID
 	ytdlp.YTDLP
 	// MusicPlayer is for plaing stuff from YT and others
 	MusicPlayer *player.Player
@@ -62,16 +67,16 @@ func startJobRunner(ctx context.Context, db *store.Queries) jobrunner.Runner {
 	return runner
 }
 
-func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries) *DBot {
+func Start(ctx context.Context, client *bot.Client, dbstore *store.Queries) *DBot {
 	backupDB, err := db.ConnectBackup(ctx, "backup.db", "")
 	if err != nil {
 		panic(err)
 	}
 
-	// sess.LogLevel = 3
 	d := DBot{
 		Ctx:         ctx,
-		Session:     sess,
+		Client:      client,
+		GuildID:     snowflake.MustParse(config.GUILD_ID),
 		MusicPlayer: player.NewPlayer(),
 		Store:       dbstore,
 		Backup:      backupDB,
@@ -87,27 +92,25 @@ func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries)
 	d.StartScheduler()
 	d.interfaceLoop()
 
-	err = sess.Open()
+	err = client.OpenGateway(ctx)
 	if err != nil {
 		panic(err)
 	}
 
-	for _, v := range cmds {
-		_, err := sess.ApplicationCommandCreate(sess.State.User.ID, config.GUILD_ID, v)
-		if err != nil {
-			panic(err)
-		}
+	_, err = client.Rest.SetGuildCommands(client.ApplicationID, d.GuildID, cmds)
+	if err != nil {
+		panic(err)
 	}
 
 	go func() {
 		for Err := range d.MusicPlayer.ErrChan {
-			log.Error(Err.Err.Error())
+			slog.Error(Err.Err.Error())
 			ch, err := d.Store.GetChannel(ctx, store.GetChannelParams{
 				Gid:  Err.GID,
 				Type: musicChannel,
 			})
 			if err != nil {
-				log.Error(err.Error())
+				slog.Error(err.Error())
 				continue
 			}
 
@@ -116,7 +119,7 @@ func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries)
 				Gid:  ch.Gid,
 				Type: errorChannel,
 			})
-			log.Trace("errChan", log.JSON(errChan), log.Err(err))
+			slog.Debug("errChan", slog.Any("errChan", errChan), slog.Any("error", err))
 			if err == nil && errChan.Chid != "" && errChan.Chid != "0" {
 				chID = errChan.Chid
 			}
@@ -129,9 +132,9 @@ func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries)
 				msg = "failed converting to mp4"
 			}
 
-			_, err = d.ChannelMessageSend(chID, msg)
+			_, err = d.Client.Rest.CreateMessage(snowflake.MustParse(chID), discord.MessageCreate{Content: msg})
 			if err != nil {
-				log.Error(err.Error())
+				slog.Error(err.Error())
 				continue
 			}
 
@@ -142,27 +145,29 @@ func Start(ctx context.Context, sess *discordgo.Session, dbstore *store.Queries)
 
 var ErrVoiceDisabled = errors.New("voice disabled")
 
-func (d *DBot) connectVoice(gID, uID string) error {
+func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 	// return ErrVoiceDisabled
 	// skip if we are already connected
 	if d.MusicPlayer.VC != nil {
 		return nil
 	}
 
-	channel, err := d.getUserVC(d.Session, gID, uID)
+	vs, err := d.getUserVC(gID, uID)
 	if err != nil {
 		return fmt.Errorf("failed to find User VC: %w", err)
 	}
 
-	vc, err := d.ChannelVoiceJoin(gID, channel.ChannelID, false, false)
+	vc := d.Client.VoiceManager.CreateConn(gID)
+	openCtx, cancel := context.WithTimeout(d.Ctx, 10*time.Second)
+	defer cancel()
+	err = vc.Open(openCtx, *vs.ChannelID, false, false)
 	if err != nil {
 		return fmt.Errorf("failed to join VC: %w", err)
 	}
 
-	// vc.LogLevel = 3
 	d.MusicPlayer.VC = vc
-	d.MusicPlayer.VCID = channel.ChannelID
-	log.Trace("[dupa]", log.Any("channel.ChannelID", channel.ChannelID))
+	d.MusicPlayer.VCID = *vs.ChannelID
+	slog.Debug("[dupa]", slog.Any("channel.ChannelID", *vs.ChannelID))
 
 	return nil
 }
@@ -175,16 +180,13 @@ const (
 
 type SaveSoundParams struct {
 	GID     string
-	Aliases string `opt:"aliases"`
-	Link    string `opt:"link"`
-	// after unmarshal only ID field will be populated
-	// if attachment was provided
-	Att *discordgo.MessageAttachment `opt:"file"`
+	Aliases string
+	Link    string
 }
 
 func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
 	params.Aliases = normalize(params.Aliases)
-	log.Trace("SaveSound", log.Any("params.Link", params.Link))
+	slog.Debug("SaveSound", slog.Any("params.Link", params.Link))
 
 	aliases := strings.Split(params.Aliases, ",")
 
@@ -194,7 +196,7 @@ func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
 	}
 
 	name := fmt.Sprintf("%s.mp4", aliases[0])
-	log.Trace("SaveSound", log.Any("link", name))
+	slog.Debug("SaveSound", slog.Any("link", name))
 	file, err := d.backupFile(BackupFileParams{
 		Name:        name,
 		GID:         params.GID,
@@ -215,7 +217,7 @@ func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
 	if err != nil {
 		return err
 	}
-	log.Trace("SaveSound", log.JSON(sound))
+	slog.Debug("SaveSound", slog.Any("sound", sound))
 
 	srq.dropAndLoad(d.Store, sound.Gid)
 
@@ -246,26 +248,19 @@ func (d *DBot) downloadAsMP4(ctx context.Context, url string) (MP4File, error) {
 	}, nil
 }
 
-func (d *DBot) Ready(s *discordgo.Session, e *discordgo.Ready) {
-	log.Info("ready")
+func (d *DBot) Ready(e *events.Ready) {
+	slog.Info("ready")
 }
 
-// returns users VoiceCHannel if user is connected to one
-// errors if guild does not exist and if user is not in voice channel
-func (d *DBot) getUserVC(s *discordgo.Session, gID string, uID string) (*discordgo.VoiceState, error) {
-	g, err := s.State.Guild(gID)
-	if err != nil {
-		return nil, err
+// returns users VoiceState if user is connected to one
+// errors if user is not in voice channel
+func (d *DBot) getUserVC(gID, uID snowflake.ID) (discord.VoiceState, error) {
+	vs, ok := d.Client.Caches.VoiceState(gID, uID)
+	if !ok || vs.ChannelID == nil {
+		return discord.VoiceState{}, fmt.Errorf("user <@%s> in guild '%s' is not in voice channel", uID, gID)
 	}
 
-	for _, vs := range g.VoiceStates {
-		if vs.UserID != uID {
-			continue
-		}
-		return vs, nil
-	}
-
-	return nil, fmt.Errorf("user <@%s> in guild '%s' is not in voice channel", uID, gID)
+	return vs, nil
 }
 
 func (d *DBot) mapChannel(params store.MapChannelParams) (store.Channel, error) {
@@ -279,14 +274,7 @@ func (d *DBot) mapChannel(params store.MapChannelParams) (store.Channel, error) 
 
 func (d *DBot) wypierdalajZVC() error {
 	if d.MusicPlayer.VC != nil {
-		err := d.MusicPlayer.VC.Disconnect()
-		if err != nil {
-			log.Error("failed to disconnect?", log.Err(err))
-			// d.MusicPlayer.ErrChan <- player.Err{
-			// 	GID: gID,
-			// 	Err: err,
-			// }
-		}
+		d.MusicPlayer.VC.Close(d.Ctx)
 	}
 	d.MusicPlayer.Close()
 
@@ -296,12 +284,12 @@ func (d *DBot) wypierdalajZVC() error {
 
 func isValidUrl(s string) bool {
 	u, err := url.Parse(s)
-	log.Trace("isValidUrl", log.JSON(u))
+	slog.Debug("isValidUrl", slog.Any("u", u))
 	return err == nil && u.Host != ""
 }
 
 func (d *DBot) play(gID, uID string, url string) error {
-	err := d.connectVoice(gID, uID)
+	err := d.connectVoice(snowflake.MustParse(gID), snowflake.MustParse(uID))
 	if err != nil {
 		return err
 	}
@@ -324,7 +312,7 @@ func (d *DBot) play(gID, uID string, url string) error {
 		if err != nil {
 			go saveVideoInDir(d, url, gID, "play_history")
 		} else {
-			log.Trace("playHistory: artefact already exists")
+			slog.Debug("playHistory: artefact already exists")
 			url = art.Path
 		}
 
@@ -335,7 +323,7 @@ func (d *DBot) play(gID, uID string, url string) error {
 }
 
 func saveVideoInDir(d *DBot, url string, gID string, dir string) {
-	log.Trace("saveInPlayHistory", log.String("url", url), log.String("gid", gID))
+	slog.Debug("saveInPlayHistory", slog.String("url", url), slog.String("gid", gID))
 	meta := BackupFileParams{
 		OriginUrl:   url,
 		GID:         gID,
@@ -346,7 +334,7 @@ func saveVideoInDir(d *DBot, url string, gID string, dir string) {
 
 	jsonMeta, err := json.Marshal(meta)
 	if err != nil {
-		log.Error("lol dupa", log.Err(err), log.String("meta", fmt.Sprintf("%+v", meta)))
+		slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
 		return
 	}
 
@@ -355,7 +343,7 @@ func saveVideoInDir(d *DBot, url string, gID string, dir string) {
 		JobType: BackupJob,
 	})
 	if err != nil {
-		log.Error("lol dupa", log.Err(err), log.String("meta", fmt.Sprintf("%+v", meta)))
+		slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
 	}
 }
 
@@ -371,20 +359,20 @@ func (d *DBot) playFromYTPlaylist(url string,gID string) error {
 		return fmt.Errorf("failed getting playlist info: %w", err)
 	}
 
-	log.Trace("adding tracks from playlist", log.Int("len", len(info.Entries)))
+	slog.Debug("adding tracks from playlist", slog.Int("len", len(info.Entries)))
 	for i := range info.Entries {
 		if info.Entries[i].Duration == nil {
-			log.Trace(
+			slog.Debug(
 				"skipping due to null duration, probably deleted vid",
-				log.String("title", info.Entries[i].Title),
-				log.String("url", info.Entries[i].URL),
+				slog.String("title", info.Entries[i].Title),
+				slog.String("url", info.Entries[i].URL),
 			)
 			continue
 		}
 		u := info.Entries[i].URL
-		art, err := d.Backup.GetArtefact(d.Ctx, url)
+		art, err := d.Backup.GetArtefact(d.Ctx, u)
 		if err != nil {
-			go saveVideoInDir(d, url, gID, "play_history")
+			go saveVideoInDir(d, u, gID, "play_history")
 		} else {
 			u = art.Path
 		}
@@ -417,10 +405,10 @@ func (d *DBot) savePlaylistFromYT(name, url, gID string) error {
 
 	for i := range info.Entries {
 		if info.Entries[i].Duration == nil {
-			log.Trace(
+			slog.Debug(
 				"skipping due to null duration, probably deleted vid",
-				log.String("title", info.Entries[i].Title),
-				log.String("url", info.Entries[i].URL),
+				slog.String("title", info.Entries[i].Title),
+				slog.String("url", info.Entries[i].URL),
 			)
 			continue
 		}
@@ -435,7 +423,7 @@ func (d *DBot) savePlaylistFromYT(name, url, gID string) error {
 
 		b, err := json.Marshal(meta)
 		if err != nil {
-			log.Error("lol dupa", log.Err(err), log.String("meta", fmt.Sprintf("%+v", meta)))
+			slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
 			continue
 		}
 
@@ -446,7 +434,7 @@ func (d *DBot) savePlaylistFromYT(name, url, gID string) error {
 			JobType:   DownloadJob,
 		})
 		if err != nil {
-			log.Error("lol dupa", log.Err(err), log.String("meta", fmt.Sprintf("%+v", meta)))
+			slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
 			continue
 		}
 	}

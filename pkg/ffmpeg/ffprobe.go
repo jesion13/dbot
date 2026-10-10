@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/fr-str/log"
 )
 
 var probeCMD = []string{
@@ -107,7 +106,7 @@ func Probe(path string) (Streams, error) {
 	cmd.Stderr = stderr
 
 	var meta Streams
-	log.Trace("Probe", log.String("cmd", cmd.String()), log.String("link", path))
+	slog.Debug("Probe", slog.String("cmd", cmd.String()), slog.String("link", path))
 	err := cmd.Run()
 	if err != nil {
 		b, _ := io.ReadAll(stderr)

@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -23,9 +24,7 @@ import (
 	"dbot/pkg/backup"
 	"dbot/pkg/config"
 
-	"github.com/fr-str/log"
-
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
 )
 
 func must[T any](v T, err error) T {
@@ -35,7 +34,7 @@ func must[T any](v T, err error) T {
 	return v
 }
 
-func backupMessage(d *DBot, m *discordgo.Message) error {
+func backupMessage(d *DBot, m discord.Message) error {
 	if m.Author.Bot {
 		return nil
 	}
@@ -48,16 +47,16 @@ func backupMessage(d *DBot, m *discordgo.Message) error {
 
 	_, err = d.Backup.UpsertUser(d.Ctx, backup.UpsertUserParams{
 		Username:  m.Author.Username,
-		DiscordID: must(strconv.ParseInt(m.Author.ID, 10, 64)),
+		DiscordID: must(strconv.ParseInt(m.Author.ID.String(), 10, 64)),
 	})
 	if err != nil {
 		return fmt.Errorf("upsert user: %w", err)
 	}
 
 	err = d.Backup.InsertBackup(d.Ctx, backup.InsertBackupParams{
-		MsgID:       must(strconv.ParseInt(m.ID, 10, 64)),
-		AuthorID:    must(strconv.ParseInt(m.Author.ID, 10, 64)),
-		ChannelID:   must(strconv.ParseInt(m.ChannelID, 10, 64)),
+		MsgID:       must(strconv.ParseInt(m.ID.String(), 10, 64)),
+		AuthorID:    must(strconv.ParseInt(m.Author.ID.String(), 10, 64)),
+		ChannelID:   must(strconv.ParseInt(m.ChannelID.String(), 10, 64)),
 		Content:     m.Content,
 		Attachments: attachments,
 		CreatedAt:   time.Now(),
@@ -69,9 +68,9 @@ func backupMessage(d *DBot, m *discordgo.Message) error {
 	return nil
 }
 
-func updateBackupMessage(d *DBot, m *discordgo.Message) error {
+func updateBackupMessage(d *DBot, m discord.Message) error {
 	err := d.Backup.UpdateBackupMsg(d.Ctx, backup.UpdateBackupMsgParams{
-		MsgID:   must(strconv.ParseInt(m.ID, 10, 64)),
+		MsgID:   must(strconv.ParseInt(m.ID.String(), 10, 64)),
 		Content: m.Content,
 	})
 	if err != nil {
@@ -81,15 +80,20 @@ func updateBackupMessage(d *DBot, m *discordgo.Message) error {
 	return nil
 }
 
-func BackupAttachment(d *DBot, m *discordgo.Message) (BackupFile, string, error) {
+func BackupAttachment(d *DBot, m discord.Message) (BackupFile, string, error) {
 	if len(m.Attachments) == 0 {
 		return BackupFile{}, "", nil
+	}
+
+	var gid string
+	if m.GuildID != nil {
+		gid = m.GuildID.String()
 	}
 
 	var info BackupFile
 	att := make([]string, len(m.Attachments))
 	for i, a := range m.Attachments {
-		log.Info("downloading attachment", log.String("url", a.URL))
+		slog.Info("downloading attachment", slog.String("url", a.URL))
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
@@ -108,9 +112,9 @@ func BackupAttachment(d *DBot, m *discordgo.Message) (BackupFile, string, error)
 			Dirs:        "attachments",
 			PrependTime: true,
 			OriginUrl:   a.URL,
-			GID:         m.GuildID,
-			CHID:        m.ChannelID,
-			MSGID:       m.ID,
+			GID:         gid,
+			CHID:        m.ChannelID.String(),
+			MSGID:       m.ID.String(),
 			File:        resp.Body,
 		})
 		if err != nil {
@@ -145,10 +149,10 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 
 	hash, err := generateHash(params.ContentType, &buf)
 	if err != nil {
-		log.Error("img hash failed", log.Err(err), log.String("content", params.ContentType), log.String("url", params.OriginUrl))
+		slog.Error("img hash failed", slog.Any("error", err), slog.String("content", params.ContentType), slog.String("url", params.OriginUrl))
 	}
 
-	log.Trace("[dupa]", log.Uint("hash", hash), log.String("content", params.ContentType))
+	slog.Debug("[dupa]", slog.Uint64("hash", hash), slog.String("content", params.ContentType))
 	if hash > 0 {
 		art, unique := d.checkHashAgainstDB(params.GID, hash)
 		if !unique {
@@ -183,17 +187,17 @@ func (d *DBot) checkHashAgainstDB(gid string, hash uint64) (art backup.Artefact,
 			Offset: offset,
 		})
 		if err != nil {
-			log.Error("failed to get Artiefacts", log.Err(err))
+			slog.Error("failed to get Artiefacts", slog.Any("error", err))
 			return backup.Artefact{}, true
 		}
 		for _, d := range data {
 			hash2 := goimagehash.NewExtImageHash([]uint64{uint64(d.Hash)}, goimagehash.DHash, 64)
 			dist, err := hash1.Distance(hash2)
 			if err != nil {
-				log.Error("failed to calc distance", log.Err(err))
+				slog.Error("failed to calc distance", slog.Any("error", err))
 			}
 			if dist <= 3 {
-				log.Trace("[dupa]", log.Any("dist", dist))
+				slog.Debug("[dupa]", slog.Any("dist", dist))
 				return d, false
 			}
 		}
@@ -273,7 +277,7 @@ func (d *DBot) backupFile(params BackupFileParams) (BackupFile, error) {
 		return backupFile, fmt.Errorf("failed to copy file: %w", err)
 	}
 
-	log.Trace("backupFile", log.String("name", pf), log.Int("size", n))
+	slog.Debug("backupFile", slog.String("name", pf), slog.Int64("size", n))
 	backupFile.Name = strings.TrimLeft(f.Name(), config.BACKUP_DIR)
 	backupFile.Size = n
 

@@ -2,63 +2,56 @@ package dbot
 
 import (
 	"context"
+	"log/slog"
 
-	"dbot/pkg/config"
-
-	"github.com/bwmarrin/discordgo"
-	"github.com/fr-str/log"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 )
 
 // descryptions are requeired by Discord
-var cmds = []*discordgo.ApplicationCommand{
-	{
+var cmds = []discord.ApplicationCommandCreate{
+	discord.SlashCommandCreate{
 		Name:        "play",
 		Description: "play audio from source",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
 				Name:        "link",
 				Description: "dupa",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionAttachment,
+			discord.ApplicationCommandOptionAttachment{
 				Name:        "file",
 				Description: "file",
 			},
 		},
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "pause-play",
 		Description: "play pause",
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "wypierdalaj",
 		Description: "bot wpierdala",
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "to-mp4",
 		Description: "Attempts to transcode video to format compatible with discord.",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
 				Name:        "link",
 				Description: "link to audio",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionAttachment,
+			discord.ApplicationCommandOptionAttachment{
 				Name:        "file",
 				Description: "file",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionBoolean,
+			discord.ApplicationCommandOptionBool{
 				Name:        "mute",
 				Description: "Remove audio from the video",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+			discord.ApplicationCommandOptionString{
 				Name:        "format",
 				Description: "Output format",
-				Choices: []*discordgo.ApplicationCommandOptionChoice{
+				Choices: []discord.ApplicationCommandOptionChoiceString{
 					{
 						Name:  "MP4",
 						Value: "mp4",
@@ -69,82 +62,72 @@ var cmds = []*discordgo.ApplicationCommand{
 					},
 				},
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+			discord.ApplicationCommandOptionString{
 				Name:        "start",
 				Description: "Clip start time (e.g., 1:30 or 90)",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+			discord.ApplicationCommandOptionString{
 				Name:        "end",
 				Description: "Clip end time (e.g., 2:00 or 120)",
 			},
 		},
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "sound",
 		Description: "add new sound",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
 				Name:        "aliases",
 				Description: "triggers for sound",
 				Required:    true,
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+			discord.ApplicationCommandOptionString{
 				Name:        "link",
 				Description: "link to audio",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionAttachment,
+			discord.ApplicationCommandOptionAttachment{
 				Name:        "file",
 				Description: "file",
 			},
 		},
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "set-bot-channel",
 		Description: "sets channels for bot to work in",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
 				Name:        "type",
 				Description: "type",
 				Required:    true,
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionChannel,
+			discord.ApplicationCommandOptionChannel{
 				Name:        "channel",
 				Description: "channel",
 				Required:    true,
 			},
 		},
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "save-playlist",
 		Description: "saves playlist and downloads all avaiable videos",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
 				Name:        "name",
 				Description: "name",
 				Required:    true,
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionString,
+			discord.ApplicationCommandOptionString{
 				Name:        "yt-link",
 				Description: "link",
 				Required:    true,
 			},
 		},
 	},
-	{
+	discord.SlashCommandCreate{
 		Name:        "load-playlist",
 		Description: "loads saved playlist",
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:         discordgo.ApplicationCommandOptionString,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
 				Name:         "name",
 				Description:  "name",
 				Autocomplete: true,
@@ -154,21 +137,21 @@ var cmds = []*discordgo.ApplicationCommand{
 	},
 }
 
-func (d *DBot) ClearCmds(s *discordgo.Session) {
-	c, err := s.ApplicationCommands(s.State.User.ID, config.GUILD_ID)
+func (d *DBot) ClearCmds() {
+	c, err := d.Client.Rest.GetGuildCommands(d.Client.ApplicationID, d.GuildID, false)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 	}
 
 	for _, v := range c {
-		err := s.ApplicationCommandDelete(s.State.User.ID, config.GUILD_ID, v.ID)
+		err := d.Client.Rest.DeleteGuildCommand(d.Client.ApplicationID, d.GuildID, v.ID())
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 		}
 	}
 }
 
-type cmdHandler = func(context.Context, *discordgo.InteractionCreate) error
+type cmdHandler = func(context.Context, *events.ApplicationCommandInteractionCreate) error
 
 func (d *DBot) CommandHandlers() map[string]cmdHandler {
 	return map[string]cmdHandler{

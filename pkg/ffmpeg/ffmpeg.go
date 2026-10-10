@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"os/exec"
@@ -14,8 +15,6 @@ import (
 	"time"
 
 	"dbot/pkg/config"
-
-	"github.com/fr-str/log"
 )
 
 var ErrFfmpegError = errors.New("ffmpeg error")
@@ -48,7 +47,7 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.F
 		return nil, err
 	}
 
-	log.Trace("ToDiscordMP4", log.String("dir", tmpDir))
+	slog.Debug("ToDiscordMP4", slog.String("dir", tmpDir))
 	duration := info.Format.Duration.Seconds()
 	if clip.End > 0 {
 		duration = clip.End.Seconds()
@@ -72,10 +71,10 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.F
 	if err != nil {
 		return nil, err
 	}
-	log.Trace("ToDiscordMP4 settings",
-		log.Int("bitrateKbps", settings.BitrateKbps),
-		log.Int("width", settings.Width),
-		log.Int("height", settings.Height))
+	slog.Debug("ToDiscordMP4 settings",
+		slog.Int("bitrateKbps", settings.BitrateKbps),
+		slog.Int("width", settings.Width),
+		slog.Int("height", settings.Height))
 	base := []string{
 		"-hide_banner",
 	}
@@ -103,7 +102,7 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.F
 	cmd.Args = append(cmd.Args,
 		"-an", "-pass", "1", "-f", "mp4", "-y", "/dev/null")
 
-	log.Info("convertToDiscordMP4 first pass", log.String("cmd", cmd.String()))
+	slog.Info("convertToDiscordMP4 first pass", slog.String("cmd", cmd.String()))
 	err = runCmd(cmd)
 	if err != nil {
 		return nil, err
@@ -126,7 +125,7 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.F
 			mp4Path)
 	}
 
-	log.Info("convertToDiscordMP4 second pass", log.String("cmd", cmd.String()))
+	slog.Info("convertToDiscordMP4 second pass", slog.String("cmd", cmd.String()))
 	err = runCmd(cmd)
 	if err != nil {
 		return nil, err
@@ -145,9 +144,9 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.F
 		f.Close()
 		return nil, fmt.Errorf("Discord MP4 is too large: %d bytes", stat.Size())
 	}
-	log.Trace("convertToDiscordMP4",
-		log.String("mp4Path", mp4Path),
-		log.String("file", f.Name()), log.Int("size", stat.Size()))
+	slog.Debug("convertToDiscordMP4",
+		slog.String("mp4Path", mp4Path),
+		slog.String("file", f.Name()), slog.Int64("size", stat.Size()))
 
 	go func() {
 		<-ctx.Done()
@@ -294,7 +293,7 @@ func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error)
 		return nil, err
 	}
 
-	log.Trace("ToDiscordGIF", log.String("dir", tmpDir))
+	slog.Debug("ToDiscordGIF", slog.String("dir", tmpDir))
 
 	duration := info.Format.Duration.Seconds()
 	if clip.End > 0 {
@@ -323,7 +322,7 @@ func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error)
 		gifPath,
 	)
 
-	log.Info("convertToDiscordGIF", log.String("cmd", cmd.String()))
+	slog.Info("convertToDiscordGIF", slog.String("cmd", cmd.String()))
 	err = runCmd(cmd)
 	if err != nil {
 		return nil, err
@@ -334,9 +333,9 @@ func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error)
 		return nil, err
 	}
 	stat, err := f.Stat()
-	log.Trace("convertToDiscordGIF",
-		log.String("gifPath", gifPath),
-		log.String("file", f.Name()), log.Int("size", stat.Size()))
+	slog.Debug("convertToDiscordGIF",
+		slog.String("gifPath", gifPath),
+		slog.String("file", f.Name()), slog.Int64("size", stat.Size()))
 
 	go func() {
 		<-ctx.Done()
@@ -397,7 +396,7 @@ func ConvertToMP4(ctx context.Context, file string, clip Clip) (*os.File, error)
 	cmd.Stdout = buf
 	cmd.Stderr = buf
 
-	log.Info("convertToMP4", log.String("cmd", cmd.String()))
+	slog.Info("convertToMP4", slog.String("cmd", cmd.String()))
 	err := cmd.Start()
 	if err != nil {
 		return nil, fmt.Errorf("cmd.Start failed: %w", err)

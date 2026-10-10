@@ -1,18 +1,15 @@
 package dbot
 
 import (
-	"errors"
-
-	"dbot/pkg/config"
-
-	"github.com/fr-str/log"
+	"github.com/disgoorg/snowflake/v2"
+	"log/slog"
 	"github.com/go-co-op/gocron/v2"
 )
 
 func (d *DBot) StartScheduler() {
 	s, err := gocron.NewScheduler()
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 		return
 	}
 
@@ -22,19 +19,19 @@ func (d *DBot) StartScheduler() {
 		gocron.NewTask(d.papaj),
 	)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 	}
-	log.Trace(j.Name())
+	slog.Debug(j.Name())
 
 	j, err = s.NewJob(
 		gocron.CronJob("0 16,18,20,22,0 * * 3", false),
 		gocron.NewTask(d.środowaNoc),
 	)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 	}
 
-	log.Trace(j.Name())
+	slog.Debug(j.Name())
 	s.Start()
 }
 
@@ -42,7 +39,7 @@ func (d *DBot) papaj() {
 	if d.MusicPlayer.VC == nil {
 		err := d.findVoiceChannel()
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 			return
 		}
 	}
@@ -56,7 +53,7 @@ func (d *DBot) środowaNoc() {
 	if d.MusicPlayer.VC == nil {
 		err := d.findVoiceChannel()
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 			return
 		}
 	}
@@ -67,21 +64,21 @@ func (d *DBot) środowaNoc() {
 
 // only used for scheduled events
 func (d *DBot) findVoiceChannel() error {
-	g, _ := d.State.Guild(config.GUILD_ID)
-	if g == nil {
-		return errors.New("dupa")
+	var channelID *snowflake.ID
+	for vs := range d.Client.Caches.VoiceStates(d.GuildID) {
+		channelID = vs.ChannelID
+		break
 	}
-
-	if len(g.VoiceStates) == 0 {
+	if channelID == nil {
 		return nil
 	}
 
-	channelID := g.VoiceStates[0].ChannelID
-	vc, err := d.ChannelVoiceJoin(g.ID, channelID, false, false)
+	vc := d.Client.VoiceManager.CreateConn(d.GuildID)
+	err := vc.Open(d.Ctx, *channelID, false, false)
 	if err != nil {
 		return err
 	}
 	d.MusicPlayer.VC = vc
-	d.MusicPlayer.VCID = channelID
+	d.MusicPlayer.VCID = *channelID
 	return nil
 }

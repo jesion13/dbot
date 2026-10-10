@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"dbot/pkg/config"
 	"dbot/pkg/store"
-
-	"github.com/fr-str/log"
 )
 
 const (
@@ -32,20 +31,20 @@ func (d *DBot) downloadAsync(meta string) error {
 	ctx = createContextTmpDir(ctx)
 
 	var dwMeta DownloadAsyncMeta
-	log.Trace("[dupa]", log.Any("meta", meta))
+	slog.Debug("[dupa]", slog.Any("meta", meta))
 	err := json.Unmarshal([]byte(meta), &dwMeta)
 	if err != nil {
 		return fmt.Errorf("downloadAsync: %w", err)
 	}
 
-	log.Trace("downloadAsync", log.Any("dwMeta.URL", dwMeta.URL))
+	slog.Debug("downloadAsync", slog.Any("dwMeta.URL", dwMeta.URL))
 	f, err := d.downloadAsMP4(ctx, dwMeta.URL)
 	if err != nil {
 		return fmt.Errorf("downloadAsync: %w", err)
 	}
 	defer f.File.Close()
 
-	log.Trace("backupFile")
+	slog.Debug("backupFile")
 	bf, err := d.backupFile(BackupFileParams{
 		Name: dwMeta.Name,
 		GID:  dwMeta.GID,
@@ -92,7 +91,7 @@ func (d *DBot) backupVideoJob(meta string) error {
 	bf.Name = f.Name
 	bf.ContentType = "video/mp4"
 
-	log.Debug("backupJob", log.JSON(bf))
+	slog.Debug("backupJob", slog.Any("bf", bf))
 	_, err = d.backupArtefact(ctx, bf)
 	if err != nil {
 		return fmt.Errorf("backupFile: %w", err)

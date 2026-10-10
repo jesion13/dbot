@@ -1,6 +1,7 @@
 package player
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,19 +10,49 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"dbot/pkg/config"
 	"dbot/pkg/ytdlp"
 
-	"github.com/bwmarrin/discordgo"
-	"github.com/fr-str/log"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/snowflake/v2"
+	"log/slog"
 	"github.com/pion/opus/pkg/oggreader"
 )
+
+// framePacer paces opus frame sends to real-time (20ms/frame), matching
+// disgo's own voice.AudioSender timing. We can't use AudioSender/
+// SetOpusFrameProvider directly: it assumes exclusive ownership of the
+// Conn, but music and sounds are two independent producers that both write
+// to the same Conn (a sound can interrupt a song mid-stream) - handing
+// ownership to a second provider silently abandons the first one, which
+// is why using it caused the song to never resume after a sound played.
+type framePacer struct {
+	lastFrameSent int64
+}
+
+func (fp *framePacer) wait() {
+	if fp.lastFrameSent == 0 {
+		fp.lastFrameSent = time.Now().UnixMilli()
+		return
+	}
+
+	sleepTime := time.Duration(int64(voice.OpusFrameSizeMs) - (time.Now().UnixMilli() - fp.lastFrameSent))
+	if sleepTime > 0 {
+		time.Sleep(sleepTime * time.Millisecond)
+	}
+	if time.Now().UnixMilli() < fp.lastFrameSent+int64(voice.OpusFrameSizeMs)*3 {
+		fp.lastFrameSent += int64(voice.OpusFrameSizeMs)
+	} else {
+		fp.lastFrameSent = time.Now().UnixMilli()
+	}
+}
 
 func (p *Player) playerErr(msg string, vars ...any) Err {
 	return Err{
 		Err: fmt.Errorf("player: "+msg+": %w", vars...),
-		GID: p.VC.GuildID,
+		GID: p.VC.GuildID().String(),
 	}
 }
 
@@ -41,9 +72,9 @@ func (t *Player) PlayPause() {
 type Player struct {
 	ytdlp.YTDLP
 
-	VCID    string
+	VCID    snowflake.ID
 	list    list
-	VC      *discordgo.VoiceConnection
+	VC      voice.Conn
 	ErrChan chan Err
 
 	// play pause
@@ -105,8 +136,8 @@ func (p *Player) PlaySound(link string) {
 
 func (p *Player) musicLoop() {
 	for a := range p.list.nextAudio {
-		log.Debug("list.nextAudio", log.JSON(a))
-		if len(a.Filepath) == 0 && strings.Contains(a.Link, p.VC.GuildID) {
+		slog.Debug("list.nextAudio", slog.Any("a", a))
+		if len(a.Filepath) == 0 && strings.Contains(a.Link, p.VC.GuildID().String()) {
 			a.Filepath = filepath.Join(config.BACKUP_DIR, a.Link)
 		}
 
@@ -116,7 +147,7 @@ func (p *Player) musicLoop() {
 			continue
 		}
 
-		log.Trace("musicLoop", log.Bool("p.list.more()", p.list.more()))
+		slog.Debug("musicLoop", slog.Bool("p.list.more()", p.list.more()))
 		if !p.list.more() {
 			p.PlayPause()
 		}
@@ -149,7 +180,7 @@ func (p *Player) soundLoop() {
 }
 
 func (p *Player) fetch(audio *Audio) error {
-	if strings.Contains(audio.Link, p.VC.GuildID) {
+	if strings.Contains(audio.Link, p.VC.GuildID().String()) {
 		audio.Filepath = filepath.Join(config.BACKUP_DIR, audio.Link)
 		return nil
 	}
@@ -168,7 +199,7 @@ func (p *Player) fetch(audio *Audio) error {
 func (p *Player) playV2(audio *Audio) error {
 	var err error
 	var pipe io.ReadCloser
-	log.Debug("playV2", log.JSON(audio))
+	slog.Debug("playV2", slog.Any("audio", audio))
 	ytdlpCMD := exec.Command("yt-dlp", "--no-playlist", "-f", "bestaudio", "-o", "-", audio.Link)
 	if audio.Filepath == "" {
 		pipe, err = ytdlpCMD.StdoutPipe()
@@ -220,31 +251,27 @@ func (p *Player) playV2(audio *Audio) error {
 		return fmt.Errorf("failed to create oggreader from stdout: %w", err)
 	}
 
-	p.VC.Speaking(true)
-	defer p.VC.Speaking(false)
+	ctx := context.Background()
+	p.VC.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
+	defer p.VC.SetSpeaking(ctx, voice.SpeakingFlagNone)
+	var pacer framePacer
 	for {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
 			if err != io.EOF {
-				log.Error("failed to parse page", log.Err(err))
+				slog.Error("failed to parse page", slog.Any("error", err))
 			}
 			break
 		}
 
 		for _, frame := range page {
 			p.Lock()
-			select {
-			// case <-p.VC.Dead:
-			// 	p.Unlock()
-			// 	if audio.Filepath == "" {
-			// 		ytdlpCMD.Process.Kill()
-			// 	}
-			// 	ffmpegCMD.Process.Kill()
-			// 	return nil
-
-			case p.VC.OpusSend <- frame:
-			}
+			pacer.wait()
+			_, err := p.VC.UDP().Write(frame)
 			p.Unlock()
+			if err != nil {
+				slog.Error("failed to write opus frame", slog.Any("error", err))
+			}
 		}
 	}
 
@@ -263,7 +290,7 @@ const dynaudnorm = `dynaudnorm=f=150:g=15:p=0.95:m=50.0`
 func (p *Player) playSound(audio *Audio) error {
 	p.Playing.Store(true)
 	defer p.Playing.Store(false)
-	log.Debug("playSound", log.JSON(audio))
+	slog.Debug("playSound", slog.Any("audio", audio))
 	cmd := exec.Command(
 		"ffmpeg", "-hide_banner", "-loglevel", "error",
 		"-i", audio.Filepath,
@@ -284,7 +311,7 @@ func (p *Player) playSound(audio *Audio) error {
 		return fmt.Errorf("failed to create Stdout pipe: %w", err)
 	}
 
-	log.Info("playSound", log.String("cmd", cmd.String()))
+	slog.Info("playSound", slog.String("cmd", cmd.String()))
 	err = cmd.Start()
 	if err != nil {
 		return fmt.Errorf("cmd.Start failed: %w", err)
@@ -295,19 +322,24 @@ func (p *Player) playSound(audio *Audio) error {
 		return fmt.Errorf("failed to create oggreader from stdout: %w", err)
 	}
 
-	p.VC.Speaking(true)
-	defer p.VC.Speaking(false)
+	ctx := context.Background()
+	p.VC.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
+	defer p.VC.SetSpeaking(ctx, voice.SpeakingFlagNone)
+	var pacer framePacer
 	for {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
 			if err != io.EOF {
-				log.Error("failed to parse page", log.Err(err))
+				slog.Error("failed to parse page", slog.Any("error", err))
 			}
 			break
 		}
 
 		for _, frame := range page {
-			p.VC.OpusSend <- frame
+			pacer.wait()
+			if _, err := p.VC.UDP().Write(frame); err != nil {
+				slog.Error("failed to write opus frame", slog.Any("error", err))
+			}
 		}
 	}
 
