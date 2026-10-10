@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"dbot/pkg/player"
 	"dbot/pkg/store"
 	"dbot/pkg/ytdlp"
 )
@@ -180,8 +181,8 @@ func (r queueResult) total() int {
 }
 
 // planQueue resolves every snapshot entry to something playable, in snapshot order.
-// It returns the links to append plus what the cache is doing about each entry.
-func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.PlaylistEntry) (links []string, res queueResult, err error) {
+// It returns the tracks to append plus what the cache is doing about each entry.
+func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.PlaylistEntry) (tracks []player.Track, res queueResult, err error) {
 	for _, e := range entries {
 		videoID := e.YoutubeVideoID.String
 		url := e.YoutubeUrl
@@ -193,7 +194,8 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 			return nil, res, fmt.Errorf("lookup '%s': %w", url, err)
 		}
 		if found {
-			links = append(links, path)
+			// URL stays the youtube source, Filepath the shared local copy
+			tracks = append(tracks, player.Track{Title: e.Title, URL: url, Filepath: artefactFile(path)})
 			res.queued++
 			res.cached++
 			continue
@@ -223,10 +225,10 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 			res.waiting++
 		}
 
-		links = append(links, url)
+		tracks = append(tracks, player.Track{Title: e.Title, URL: url})
 		res.queued++
 	}
-	return links, res, nil
+	return tracks, res, nil
 }
 
 // deletePlaylist soft-deletes a playlist and drops its entries in one transaction.
@@ -261,18 +263,21 @@ func (d *DBot) deletePlaylist(ctx context.Context, playlistID int64, guildID str
 	return pl.Title, nil
 }
 
-// queueSnapshot appends a whole saved snapshot to the existing queue, in stored order.
+// queueSnapshot appends a whole saved snapshot to the existing queue, in stored
+// order. The batch goes in as one operation so a playlist can never interleave
+// with another enqueue.
 func (d *DBot) queueSnapshot(ctx context.Context, gid string, playlistID int64) (queueResult, error) {
 	entries, err := d.Store.ListPlaylistEntries(ctx, playlistID)
 	if err != nil {
 		return queueResult{}, fmt.Errorf("list entries: %w", err)
 	}
-	links, res, err := d.planQueue(ctx, gid, entries)
+	tracks, res, err := d.planQueue(ctx, gid, entries)
 	if err != nil {
 		return res, err
 	}
-	for _, l := range links {
-		d.MusicPlayer.Add(l)
+	// order and duplicates come from the snapshot and are preserved as they are
+	if err := d.Player().EnqueueMany(tracks); err != nil {
+		return res, err
 	}
 	return res, nil
 }

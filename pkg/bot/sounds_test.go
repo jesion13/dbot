@@ -82,3 +82,51 @@ func TestFindSound(t *testing.T) {
 		require.True(t, errors.Is(err, ErrSoundNotFound))
 	})
 }
+
+func TestFindSoundEvent(t *testing.T) {
+	// `event N` is one request holding N sounds, so it must return exactly N.
+	// srq pools the library per guild and hands sounds out without replacement, so
+	// every case reloads it first.
+	db := openTestStore(t)
+	srq.s = map[string][]store.Sound{}
+	reset := func() { srq.dropAndLoad(db.Queries, testGID) }
+
+	t.Run("count", func(t *testing.T) {
+		reset()
+		sounds, err := findSound(db.Queries, "event 3", testGID)
+		require.NoError(t, err)
+		require.Len(t, sounds, 3)
+	})
+
+	t.Run("sound N works the same", func(t *testing.T) {
+		reset()
+		sounds, err := findSound(db.Queries, "sound2", testGID)
+		require.NoError(t, err)
+		require.Len(t, sounds, 2)
+	})
+
+	t.Run("non numeric falls back to one random sound", func(t *testing.T) {
+		reset()
+		sounds, err := findSound(db.Queries, "eventalot", testGID)
+		require.NoError(t, err)
+		require.Len(t, sounds, 1)
+	})
+
+	t.Run("asking for more than the library holds repeats, never panics", func(t *testing.T) {
+		reset()
+		sounds, err := findSound(db.Queries, "event 500", testGID)
+		require.NoError(t, err)
+		require.Len(t, sounds, 500, "the library is reloaded as it empties")
+	})
+
+	t.Run("a guild without sounds is an error, not a panic", func(t *testing.T) {
+		_, err := findSound(db.Queries, "event 3", "empty-guild")
+		require.ErrorIs(t, err, ErrSoundNotFound)
+	})
+
+	t.Run("a zero count is rejected", func(t *testing.T) {
+		reset()
+		_, err := findSound(db.Queries, "event0", testGID)
+		require.ErrorIs(t, err, ErrInvalidSoundCount)
+	})
+}

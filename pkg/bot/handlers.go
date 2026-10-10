@@ -275,12 +275,14 @@ func (d *DBot) handleMapChannel(ctx context.Context, e *events.ApplicationComman
 }
 
 func (d *DBot) handlePause(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
-	err := e.CreateMessage(discord.MessageCreate{
-		Content: fmt.Sprintf("paused %v", !d.MusicPlayer.Playing.Load()),
+	err := d.Player().TogglePause()
+	if err != nil {
+		return err
+	}
+	return e.CreateMessage(discord.MessageCreate{
+		Content: fmt.Sprintf("paused %v", d.Player().Paused()),
 		Flags:   discord.MessageFlagEphemeral,
 	})
-	d.MusicPlayer.PlayPause()
-	return err
 }
 
 func (d *DBot) handleSound(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {

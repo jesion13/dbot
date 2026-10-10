@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"dbot/pkg/backup"
@@ -38,8 +39,42 @@ type DBot struct {
 	ytdlp.YTDLP
 	// PlaylistInfoFunc fetches playlist metadata; nil means use yt-dlp.
 	PlaylistInfoFunc func(link string) (ytdlp.PlaylistMeta, error)
-	// MusicPlayer is for plaing stuff from YT and others
+	// MusicPlayer is for plaing stuff from YT and others. It is replaced when the
+	// bot leaves a voice channel, so every read goes through Player() under mu.
+	playerMu    sync.RWMutex
 	MusicPlayer *player.Player
+	// playerErrs is the single reporting stream. It outlives every player
+	// instance: a replaced player's errors are forwarded into it, so a swap can
+	// never silence error reporting.
+	playerErrs chan player.Err
+}
+
+// Player returns the active player. Safe against a concurrent replacement.
+func (d *DBot) Player() *player.Player {
+	d.playerMu.RLock()
+	defer d.playerMu.RUnlock()
+	return d.MusicPlayer
+}
+
+// setPlayer swaps in a new player and starts forwarding its errors. The old player
+// is expected to have been closed already, which ends its forwarding.
+func (d *DBot) SetPlayer(p *player.Player) {
+	d.playerMu.Lock()
+	d.MusicPlayer = p
+	d.playerMu.Unlock()
+
+	// a forwarder per player, and it exits when that player is closed (which closes
+	// ErrChan), so replacements do not accumulate goroutines
+	go func() {
+		for e := range p.ErrChan {
+			select {
+			case d.playerErrs <- e:
+			case <-d.Ctx.Done():
+				return
+			}
+		}
+		slog.Debug("player error forwarding stopped")
+	}()
 }
 
 // playlistInfo is the single place playlist metadata is fetched, so tests can stub it.
@@ -85,14 +120,15 @@ func Start(ctx context.Context, client *bot.Client, dbstore *db.Store) *DBot {
 	}
 
 	d := DBot{
-		Ctx:         ctx,
-		Client:      client,
-		GuildID:     snowflake.MustParse(config.GUILD_ID),
-		MusicPlayer: player.NewPlayer(),
-		Store:       dbstore.Queries,
-		StoreDB:     dbstore,
-		Backup:      backupDB,
+		Ctx:        ctx,
+		Client:     client,
+		GuildID:    snowflake.MustParse(config.GUILD_ID),
+		Store:      dbstore.Queries,
+		StoreDB:    dbstore,
+		Backup:     backupDB,
+		playerErrs: make(chan player.Err, 16),
 	}
+	d.SetPlayer(player.NewPlayer())
 
 	runner := startJobRunner(ctx, dbstore.Queries)
 	runner.RegisterJob(BackupJob, d.backupVideoJob)
@@ -113,45 +149,56 @@ func Start(ctx context.Context, client *bot.Client, dbstore *db.Store) *DBot {
 		panic(err)
 	}
 
-	go func() {
-		for Err := range d.MusicPlayer.ErrChan {
-			slog.Error(Err.Err.Error())
-			ch, err := d.Store.GetChannel(ctx, store.GetChannelParams{
-				Gid:  Err.GID,
-				Type: musicChannel,
-			})
-			if err != nil {
-				slog.Error(err.Error())
-				continue
-			}
-
-			chID := ch.Chid
-			errChan, err := d.Store.GetChannel(ctx, store.GetChannelParams{
-				Gid:  ch.Gid,
-				Type: errorChannel,
-			})
-			slog.Debug("errChan", slog.Any("errChan", errChan), slog.Any("error", err))
-			if err == nil && errChan.Chid != "" && errChan.Chid != "0" {
-				chID = errChan.Chid
-			}
-
-			msg := Err.Err.Error()
-			switch {
-			case errors.Is(Err.Err, ytdlp.ErrFailedToDownload):
-				msg = "could not download video"
-			case errors.Is(Err.Err, ffmpeg.ErrFfmpegError):
-				msg = "failed converting to mp4"
-			}
-
-			_, err = d.Client.Rest.CreateMessage(snowflake.MustParse(chID), discord.MessageCreate{Content: msg})
-			if err != nil {
-				slog.Error(err.Error())
-				continue
-			}
-
-		}
-	}()
+	go d.reportPlayerErrors(ctx)
 	return &d
+}
+
+// reportPlayerErrors posts player failures to the guild's channel. It reads the
+// bot's single stream, not any one player's channel, so replacing the player does
+// not silence reporting.
+func (d *DBot) reportPlayerErrors(ctx context.Context) {
+	d.consumePlayerErrors(func(Err player.Err) {
+		slog.Error(Err.Err.Error())
+		ch, err := d.Store.GetChannel(ctx, store.GetChannelParams{
+			Gid:  Err.GID,
+			Type: musicChannel,
+		})
+		if err != nil {
+			slog.Error(err.Error())
+			return
+		}
+
+		chID := ch.Chid
+		errChan, err := d.Store.GetChannel(ctx, store.GetChannelParams{
+			Gid:  ch.Gid,
+			Type: errorChannel,
+		})
+		slog.Debug("errChan", slog.Any("errChan", errChan), slog.Any("error", err))
+		if err == nil && errChan.Chid != "" && errChan.Chid != "0" {
+			chID = errChan.Chid
+		}
+
+		msg := Err.Err.Error()
+		switch {
+		case errors.Is(Err.Err, ytdlp.ErrFailedToDownload):
+			msg = "could not download video"
+		case errors.Is(Err.Err, ffmpeg.ErrFfmpegError):
+			msg = "failed converting to mp4"
+		}
+
+		_, err = d.Client.Rest.CreateMessage(snowflake.MustParse(chID), discord.MessageCreate{Content: msg})
+		if err != nil {
+			slog.Error(err.Error())
+		}
+	})
+}
+
+// consumePlayerErrors drains the bot's error stream into handle. It is separate from
+// the posting so a test can drive the reporting loop without a store or a REST client.
+func (d *DBot) consumePlayerErrors(handle func(player.Err)) {
+	for Err := range d.playerErrs {
+		handle(Err)
+	}
 }
 
 var ErrVoiceDisabled = errors.New("voice disabled")
@@ -159,7 +206,7 @@ var ErrVoiceDisabled = errors.New("voice disabled")
 func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 	// return ErrVoiceDisabled
 	// skip if we are already connected
-	if d.MusicPlayer.VC != nil {
+	if conn, _ := d.Player().Conn(); conn != nil {
 		return nil
 	}
 
@@ -176,8 +223,7 @@ func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 		return fmt.Errorf("failed to join VC: %w", err)
 	}
 
-	d.MusicPlayer.VC = vc
-	d.MusicPlayer.VCID = *vs.ChannelID
+	d.Player().SetVC(vc, *vs.ChannelID)
 	slog.Debug("[dupa]", slog.Any("channel.ChannelID", *vs.ChannelID))
 
 	return nil
@@ -283,13 +329,19 @@ func (d *DBot) mapChannel(params store.MapChannelParams) (store.Channel, error) 
 	return ch, nil
 }
 
+// wypierdalajZVC tears down the current voice session and installs a fresh player.
+// Ordering matters: the player is closed first, because Close joins the workers
+// that write to the connection, and only then is that connection closed.
 func (d *DBot) wypierdalajZVC() error {
-	if d.MusicPlayer.VC != nil {
-		d.MusicPlayer.VC.Close(d.Ctx)
+	old := d.Player()
+	if err := old.Close(); err != nil {
+		slog.Error("failed closing player", slog.Any("error", err))
 	}
-	d.MusicPlayer.Close()
+	if conn, _ := old.Conn(); conn != nil {
+		conn.Close(d.Ctx)
+	}
 
-	d.MusicPlayer = player.NewPlayer()
+	d.SetPlayer(player.NewPlayer())
 	return nil
 }
 
@@ -329,13 +381,14 @@ func (d *DBot) play(ctx context.Context, gID, uID string, url string) error {
 			slog.Error("artefact lookup failed", slog.Any("error", err), slog.String("url", url))
 		} else if found {
 			slog.Debug("play: artefact already exists", slog.String("path", path))
-			url = path
+			// url stays the source, filepath the local copy - the player never guesses
+			return d.Player().Enqueue(player.Track{URL: url, Filepath: artefactFile(path)})
 		} else {
 			slog.Debug("play: not cached, queueing source and scheduling backup", slog.String("url", url))
 			go d.saveVideoInDir(url, gID, videoBackupDir)
 		}
 
-		d.MusicPlayer.Add(url)
+		return d.Player().Enqueue(player.Track{URL: url})
 	}
 
 	return nil
@@ -375,6 +428,5 @@ func (d *DBot) playPlaylistURL(ctx context.Context, gID, playlistID string) erro
 
 func (d *DBot) searchAndPlay(url string) error {
 	url = fmt.Sprintf(`ytsearch:"%s"`, url)
-	d.MusicPlayer.Add(url)
-	return nil
+	return d.Player().Enqueue(player.Track{URL: url})
 }

@@ -1,9 +1,12 @@
 package dbot
 
 import (
+	"log/slog"
+
+	"dbot/pkg/player"
+
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/go-co-op/gocron/v2"
-	"log/slog"
 )
 
 func (d *DBot) StartScheduler() {
@@ -36,29 +39,33 @@ func (d *DBot) StartScheduler() {
 }
 
 func (d *DBot) papaj() {
-	if d.MusicPlayer.VC == nil {
-		err := d.findVoiceChannel()
-		if err != nil {
-			slog.Error(err.Error())
-			return
-		}
-	}
-
-	if d.MusicPlayer.VC != nil {
-		d.MusicPlayer.PlaySound("/492318912881491981/sounds/papaj.mp4")
-	}
+	d.playScheduledSound("/492318912881491981/sounds/papaj.mp4")
 }
 
 func (d *DBot) środowaNoc() {
-	if d.MusicPlayer.VC == nil {
-		err := d.findVoiceChannel()
-		if err != nil {
+	d.playScheduledSound("/492318912881491981/sounds/srodowanoc.mp4")
+}
+
+// playScheduledSound connects if needed, then queues one sound.
+func (d *DBot) playScheduledSound(rel string) {
+	conn, _ := d.Player().Conn()
+	if conn == nil {
+		if err := d.findVoiceChannel(); err != nil {
 			slog.Error(err.Error())
 			return
 		}
+		if conn, _ = d.Player().Conn(); conn == nil {
+			return
+		}
 	}
-	if d.MusicPlayer.VC != nil {
-		d.MusicPlayer.PlaySound("/492318912881491981/sounds/srodowanoc.mp4")
+	d.playSoundFile(rel)
+}
+
+// playSoundFile queues a sound already stored in the shared backup dir.
+func (d *DBot) playSoundFile(rel string) {
+	err := d.Player().EnqueueSound(player.SoundTrack{Filepath: artefactFile(rel)})
+	if err != nil {
+		slog.Error("failed queueing sound", slog.String("file", rel), slog.Any("error", err))
 	}
 }
 
@@ -78,7 +85,6 @@ func (d *DBot) findVoiceChannel() error {
 	if err != nil {
 		return err
 	}
-	d.MusicPlayer.VC = vc
-	d.MusicPlayer.VCID = *channelID
+	d.Player().SetVC(vc, *channelID)
 	return nil
 }

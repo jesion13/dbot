@@ -12,6 +12,8 @@ import (
 
 	"dbot/pkg/backup"
 	"dbot/pkg/config"
+	"dbot/pkg/player"
+	"dbot/pkg/store"
 	"dbot/pkg/ytdlp"
 
 	"github.com/disgoorg/disgo/bot"
@@ -135,6 +137,12 @@ func (d *DBot) messagesListener(e *events.GuildMessageCreate) {
 	// 	return err
 	// }
 
+	// queue commands are consumed before sound matching: "!next" and friends would
+	// otherwise fuzzy-match a sound alias
+	if d.queueCommandListener(m) {
+		return
+	}
+
 	isKnownSound(d, m)
 	soundAll(d, m)
 }
@@ -171,8 +179,14 @@ func soundAll(d *DBot, m discord.Message) {
 		return
 	}
 
+	// one request, not len(sounds) of them: nothing may interleave with them
+	seq := player.SoundSequence{Tracks: make([]player.SoundTrack, 0, len(sounds))}
 	for _, s := range sounds {
-		d.MusicPlayer.PlaySound(s.Url)
+		seq.Tracks = append(seq.Tracks, soundTrack(s))
+	}
+	err = d.Player().EnqueueSoundSequence(seq)
+	if err != nil {
+		slog.Error("failed queueing sounds", slog.Any("error", err))
 	}
 }
 
@@ -207,23 +221,36 @@ func isKnownSound(d *DBot, m discord.Message) {
 		return
 	}
 
+	seq := make([]player.SoundTrack, 0, len(sound))
 	for _, s := range sound {
 		if strings.Contains(s.Url, "riotgames") {
 			continue
 		}
 		slog.Debug("isKnownSound", slog.Any("sound.Url", s.Url), slog.Any("name", s.Aliases))
-		d.MusicPlayer.PlaySound(s.Url)
+		seq = append(seq, soundTrack(s))
+	}
+	// `event 13` is one sequence of 13 sounds, not 13 competing requests
+	if err := d.Player().EnqueueSoundSequence(player.SoundSequence{Tracks: seq}); err != nil {
+		slog.Error("failed queueing sound", slog.Any("error", err))
+	}
+}
+
+// soundTrack points the player at the sound already kept in the shared backup
+// dir, so playback never re-downloads and never guesses from the path.
+func soundTrack(s store.Sound) player.SoundTrack {
+	return player.SoundTrack{
+		Title:    strings.Join(s.Aliases, ","),
+		URL:      s.OriginUrl,
+		Filepath: artefactFile(s.Url),
 	}
 }
 
 func (d *DBot) onUserVoiceStateChange(e *events.GuildVoiceStateUpdate) {
-	slog.Debug("onUserVoiceStateChange", slog.Any("d.MusicPlayer.VC == nil", d.MusicPlayer.VC == nil))
-	if d.MusicPlayer.VC == nil {
+	conn, botChanID := d.Player().Conn()
+	slog.Debug("onUserVoiceStateChange", slog.Bool("connected", conn != nil), slog.Any("botChanID", botChanID))
+	if conn == nil {
 		return
 	}
-
-	botChanID := d.MusicPlayer.VCID
-	slog.Debug("onUserVoiceStateChange", slog.Any("botChanID", botChanID))
 	gID := e.VoiceState.GuildID
 	var botChanUserCount int
 	for vs := range d.Client.Caches.VoiceStates(gID) {

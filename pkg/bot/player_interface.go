@@ -17,22 +17,23 @@ func (d *DBot) interfaceLoop() {
 		var lastContent string
 		var lastID snowflake.ID
 		for range tic.C {
-			if d.MusicPlayer.VC == nil {
+			conn, _ := d.Player().Conn()
+			if conn == nil {
 				continue
 			}
 			c, err := d.Store.GetChannel(d.Ctx, store.GetChannelParams{
-				Gid:  d.MusicPlayer.VC.GuildID().String(),
+				Gid:  conn.GuildID().String(),
 				Type: "music",
 			})
 			if err != nil {
 				continue
 			}
-			current := d.MusicPlayer.Current()
+			current := d.Player().Current()
 			if current == nil {
 				continue
 			}
 
-			content := fmt.Sprintf("Playing [%s](%s)", current.Title, current.Link)
+			content := fmt.Sprintf("Playing [%s](%s)", current.Title, current.URL)
 			if content == lastContent {
 				continue
 			}

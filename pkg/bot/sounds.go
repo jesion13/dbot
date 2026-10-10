@@ -4,18 +4,24 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"strconv"
 	"strings"
 	"sync"
 
+	"dbot/pkg/player"
 	"dbot/pkg/store"
 
 	fuzzy "github.com/paul-mannino/go-fuzzywuzzy"
 )
 
-var ErrSoundNotFound = errors.New("sound not found")
+var (
+	ErrSoundNotFound     = errors.New("sound not found")
+	ErrNoSoundsLeft      = errors.New("no sounds left in the library")
+	ErrInvalidSoundCount = errors.New("sound count must be positive")
+)
 
 type soundsRandQ struct {
 	sync.Mutex
@@ -42,20 +48,27 @@ func (srq *soundsRandQ) dropAndLoad(db *store.Queries, gid string) {
 	srq.refresh(db, gid)
 }
 
-func (srq *soundsRandQ) rand(db *store.Queries, gid string) store.Sound {
+func (srq *soundsRandQ) rand(db *store.Queries, gid string) (store.Sound, error) {
 	srq.refresh(db, gid)
 	srq.Lock()
 	defer srq.Unlock()
 	sounds := srq.s[gid]
-	randInt, _ := rand.Int(rand.Reader, big.NewInt(int64(len(sounds))))
+	if len(sounds) == 0 {
+		return store.Sound{}, ErrNoSoundsLeft
+	}
+	randInt, err := rand.Int(rand.Reader, big.NewInt(int64(len(sounds))))
+	if err != nil {
+		return store.Sound{}, fmt.Errorf("pick random sound: %w", err)
+	}
 
-	slog.Debug("soundsRandQ.rand", slog.Any("srq.s[gid]", len(srq.s[gid])), slog.Any("randInt", randInt))
-	v := sounds[randInt.Int64()]
+	i := randInt.Int64()
+	slog.Debug("soundsRandQ.rand", slog.Int("sounds", len(sounds)), slog.Int64("randInt", i))
+	v := sounds[i]
 
-	sounds[randInt.Int64()] = sounds[len(sounds)-1]
+	sounds[i] = sounds[len(sounds)-1]
 	sounds = sounds[:len(sounds)-1]
 	srq.s[gid] = sounds
-	return v
+	return v, nil
 }
 
 func (srq *soundsRandQ) all(db *store.Queries, gid string) []store.Sound {
@@ -96,19 +109,40 @@ func findSound(db *store.Queries, name string, gid string) ([]store.Sound, error
 	name = strings.ToLower(strings.ReplaceAll(name, " ", ""))
 	if strings.HasPrefix(name, "sound") || strings.HasPrefix(name, "event") {
 		if len(name) < 5 {
-			return append(ss, srq.rand(db, gid)), nil
+			s, err := srq.rand(db, gid)
+			if err != nil {
+				return nil, err
+			}
+			return append(ss, s), nil
 		}
 
 		num := name[5:]
 		numInt, err := strconv.Atoi(num)
 		if err != nil {
-			return append(ss, srq.rand(db, gid)), nil
+			s, rerr := srq.rand(db, gid)
+			if rerr != nil {
+				return nil, rerr
+			}
+			return append(ss, s), nil
+		}
+		if numInt < 1 {
+			return nil, ErrInvalidSoundCount
 		}
 
-		for range min(numInt, 2137) {
-			ss = append(ss, srq.rand(db, gid))
+		// one request holding N sounds; capped so the player always accepts it
+		for range min(numInt, player.MaxSoundsPerSequence) {
+			s, err := srq.rand(db, gid)
+			if err != nil {
+				// library exhausted mid-sequence: play what was picked, do not panic
+				slog.Warn("sound library exhausted", slog.Int("picked", len(ss)), slog.Any("error", err))
+				break
+			}
+			ss = append(ss, s)
 		}
 
+		if len(ss) == 0 {
+			return nil, ErrSoundNotFound
+		}
 		return ss, nil
 	}
 

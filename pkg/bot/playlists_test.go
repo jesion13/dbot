@@ -444,17 +444,20 @@ func TestAppendEntriesOrderAndCache(t *testing.T) {
 	// 'b' is already cached and must be queued as a local file
 	tb.writeArtefactFile(t, canonicalVideoURL("b"), testGID+"/play_history/b.mp4")
 
-	links, res, err := tb.planQueue(ctx, testGID, entries)
+	tracks, res, err := tb.planQueue(ctx, testGID, entries)
 	require.NoError(t, err)
 	assert.Equal(t, 3, res.queued)
 	assert.Equal(t, 1, res.cached, "b plays from local media")
 	assert.Equal(t, 2, res.waiting)
 	assert.Equal(t, 0, res.unscheduled)
 	assert.Equal(t, 0, res.unavailable)
-	require.Len(t, links, 3)
-	assert.Equal(t, canonicalVideoURL("a"), links[0])
-	assert.Equal(t, testGID+"/play_history/b.mp4", links[1], "cached video plays from disk")
-	assert.Equal(t, canonicalVideoURL("c"), links[2])
+	require.Len(t, tracks, 3)
+	// the source url is always kept, the local file only when one exists
+	assert.Equal(t, canonicalVideoURL("a"), tracks[0].URL)
+	assert.Empty(t, tracks[0].Filepath)
+	assert.Equal(t, canonicalVideoURL("b"), tracks[1].URL)
+	assert.Equal(t, artefactFile(testGID+"/play_history/b.mp4"), tracks[1].Filepath, "cached video plays from disk")
+	assert.Equal(t, canonicalVideoURL("c"), tracks[2].URL)
 }
 
 func TestAppendEntriesSkipsMissingFile(t *testing.T) {
@@ -470,10 +473,11 @@ func TestAppendEntriesSkipsMissingFile(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	links, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
+	tracks, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
 	require.NoError(t, err)
-	assert.Len(t, links, 1, "the source url is queued instead")
-	assert.Equal(t, canonicalVideoURL("a"), links[0])
+	assert.Len(t, tracks, 1, "the source url is queued instead")
+	assert.Equal(t, canonicalVideoURL("a"), tracks[0].URL)
+	assert.Empty(t, tracks[0].Filepath)
 	assert.Equal(t, 1, res.waiting, "broken artefact must be repaired in the background")
 	assert.Equal(t, 0, res.cached)
 }
@@ -490,9 +494,9 @@ func TestAppendEntriesOneBadEntryDoesNotBlock(t *testing.T) {
 	entries[0].YoutubeUrl = ""
 	entries[0].YoutubeVideoID.String = ""
 
-	links, res, err := tb.planQueue(ctx, testGID, entries)
+	tracks, res, err := tb.planQueue(ctx, testGID, entries)
 	require.NoError(t, err)
-	assert.Equal(t, 2, len(links))
+	assert.Equal(t, 2, len(tracks))
 	assert.Equal(t, 1, res.unavailable)
 	assert.Equal(t, 2, res.waiting)
 }
@@ -871,10 +875,10 @@ func TestPlanQueueSkipsKnownUnavailableVideos(t *testing.T) {
 	require.NotZero(t, ins)
 	before := tb.queueLen(t)
 
-	links, qr, err := tb.planQueue(ctx, testGID, entries)
+	tracks, qr, err := tb.planQueue(ctx, testGID, entries)
 	require.NoError(t, err)
-	require.Len(t, links, 1, "only the playable entry may be queued")
-	assert.Equal(t, canonicalVideoURL("b"), links[0])
+	require.Len(t, tracks, 1, "only the playable entry may be queued")
+	assert.Equal(t, canonicalVideoURL("b"), tracks[0].URL)
 	assert.Equal(t, 1, qr.unavailable)
 	assert.Equal(t, 1, qr.waiting)
 	assert.Equal(t, before+1, tb.queueLen(t), "only 'b' may get a job; the dead video must not")
@@ -992,10 +996,11 @@ func TestPlanQueuePlaysCachedFileOfUnavailableVideo(t *testing.T) {
 	markQueue(t, tb, canonicalVideoURL("a"), "unavailable", 0)
 	tb.writeArtefactFile(t, canonicalVideoURL("a"), testGID+"/play_history/a.mp4")
 
-	links, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
+	tracks, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
 	require.NoError(t, err)
-	require.Len(t, links, 1)
-	assert.Equal(t, testGID+"/play_history/a.mp4", links[0], "the local file wins over job history")
+	require.Len(t, tracks, 1)
+	assert.Equal(t, artefactFile(testGID+"/play_history/a.mp4"), tracks[0].Filepath, "the local file wins over job history")
+	assert.Equal(t, canonicalVideoURL("a"), tracks[0].URL, "and the source url is still kept")
 	assert.Equal(t, 1, res.cached)
 	assert.Equal(t, 0, res.unavailable)
 }
@@ -1008,10 +1013,10 @@ func TestPlanQueueSkipsUnavailableAndKeepsTheRest(t *testing.T) {
 	require.NoError(t, err)
 	markQueue(t, tb, canonicalVideoURL("b"), "unavailable", 0)
 
-	links, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
+	tracks, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
 	require.NoError(t, err)
-	require.Len(t, links, 2, "one dead entry must not stop the others")
-	assert.NotContains(t, links, canonicalVideoURL("b"))
+	require.Len(t, tracks, 2, "one dead entry must not stop the others")
+	assert.NotContains(t, trackURLs(tracks), canonicalVideoURL("b"))
 	assert.Equal(t, 1, res.unavailable)
 	assert.Equal(t, 2, res.waiting)
 	assert.Equal(t, 2, res.queued, "queued counts what was appended, not what was inspected")
@@ -1030,10 +1035,20 @@ func TestPlanQueueNeverQueuesMissingPaths(t *testing.T) {
 		OriginUrl: canonicalVideoURL("a"), Path: testGID + "/play_history/gone.mp4", MediaType: "video/mp4",
 	}))
 
-	links, _, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
+	tracks, _, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
 	require.NoError(t, err)
-	require.Len(t, links, 1)
-	assert.Equal(t, canonicalVideoURL("a"), links[0], "a nonexistent path is never queued")
+	require.Len(t, tracks, 1)
+	assert.Equal(t, canonicalVideoURL("a"), tracks[0].URL, "a nonexistent path is never queued")
+	assert.Empty(t, tracks[0].Filepath, "and no filepath is invented for it")
+}
+
+// trackURLs is what planQueue hands to the player, reduced to the source urls.
+func trackURLs(tracks []player.Track) []string {
+	out := make([]string, 0, len(tracks))
+	for _, t := range tracks {
+		out = append(out, t.URL)
+	}
+	return out
 }
 
 // --- snapshot validation ---------------------------------------------------
