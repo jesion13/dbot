@@ -41,6 +41,7 @@ func StartServer(d *dbot.DBot) {
 	})
 	http.HandleFunc("/api/init-scrape", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
+		return
 		go func() {
 			gID := ""
 
