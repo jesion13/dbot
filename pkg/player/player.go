@@ -222,7 +222,7 @@ func (p *Player) playV2(audio *Audio) error {
 		"-i", "-", // audio.Filepath,
 		"-ar", "48000",
 		"-ac", "2",
-		"-af", dynaudnorm,
+		// "-af", dynaudnorm,
 		"-c:a", "libopus",
 		"-frame_duration", "20",
 		"-vbr", "off",
@@ -290,9 +290,11 @@ func (p *Player) playV2(audio *Audio) error {
 	return nil
 }
 
-// const dynaudnorm = `dynaudnorm=f=150:g=15:p=0.9`
+// dynaudnorm keeps clips at a similar loudness. m (max gain) was 50dB, which pumps
+// quiet ambience - rain, room tone - up into the noise floor and hands it straight
+// to a lossy encoder. 10dB is ffmpeg's default and leaves quiet material quiet.
+// const dynaudnorm = `dynaudnorm=f=150:g=15:p=0.95:m=10.0`
 
-const dynaudnorm = `dynaudnorm=f=150:g=15:p=0.95:m=50.0`
 
 func (p *Player) playSound(audio *Audio) error {
 	p.Playing.Store(true)
@@ -305,7 +307,7 @@ func (p *Player) playSound(audio *Audio) error {
 		"-ac", "2",
 		"-c:a", "libopus",
 		"-frame_duration", "20",
-		"-af", dynaudnorm,
+		// "-af", dynaudnorm,
 		"-vbr", "off",
 		"-b:a", "64k",
 		"-application", "audio",
