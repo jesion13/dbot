@@ -62,6 +62,8 @@ func bot(ctx context.Context, db *store.Queries) {
 	api.StartServer(d)
 
 	<-ctx.Done()
-	client.Close(ctx)
+	closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client.Close(closeCtx)
 	time.Sleep(time.Second)
 }
