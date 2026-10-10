@@ -2,6 +2,7 @@ package dbot
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"dbot/pkg/ffmpeg"
 	"dbot/pkg/store"
@@ -16,6 +18,7 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/rest"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 func parseTime(s string) (time.Duration, error) {
@@ -48,6 +51,69 @@ func parseTime(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// ErrInteractionAnswered means the interaction was already acknowledged, so the
+// generic error path in listeners.go must not send a second initial response. It is
+// returned even when delivering the final message failed: the interaction is consumed
+// either way and a second initial response would be rejected by discord.
+var ErrInteractionAnswered = errors.New("interaction already answered")
+
+const maxMessageLen = 2000
+
+// truncate shortens s to discord's limit without splitting a utf-8 rune.
+func truncate(s string) string {
+	if len(s) <= maxMessageLen {
+		return s
+	}
+	s = s[:maxMessageLen-1]
+	// back off to a rune boundary
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// answerDeferred finalizes an acknowledged interaction: it first edits the deferred
+// "thinking" response and falls back to a follow-up message. It always returns
+// ErrInteractionAnswered, because the interaction is consumed either way and a second
+// initial response would be rejected by discord.
+func (d *DBot) answerDeferred(e *events.ApplicationCommandInteractionCreate, content string) error {
+	return deliverDeferred(content,
+		func(c string) error {
+			_, err := d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{Content: &c})
+			return err
+		},
+		func(c string) error {
+			_, err := d.Client.Rest.CreateFollowupMessage(d.Client.ApplicationID, e.Token(), discord.MessageCreate{Content: c})
+			return err
+		})
+}
+
+// deliverDeferred writes the final message, trying the deferred response first and a
+// follow-up message second. It never sends another initial interaction response.
+// edit and followup are injected so every delivery path is testable without discord.
+func deliverDeferred(content string, edit, followup func(string) error) error {
+	content = truncate(content)
+
+	err := edit(content)
+	if err == nil {
+		return ErrInteractionAnswered
+	}
+	slog.Error("failed editing deferred response", slog.Any("error", err))
+
+	if err := followup(content); err != nil {
+		// a follow-up can be rejected too (expired token); nothing left to try
+		slog.Error("failed sending deferred follow-up", slog.Any("error", err))
+	}
+	return ErrInteractionAnswered
+}
+
+// isPlaylistRequest reports whether a /play url addresses a whole playlist. Playlist
+// playback always does queue/cache/voice work, so those interactions are deferred.
+func isPlaylistRequest(url string) bool {
+	link, ok := parseYTLink(url)
+	return ok && link.Playlist
+}
+
 func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
 	data := e.SlashCommandInteractionData()
 	url := data.String("link")
@@ -59,7 +125,21 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 		url = att.URL
 	}
 
-	err := d.play(e.GuildID().String(), e.User().ID.String(), url)
+	// defer before any playlist lookup, yt-dlp call or voice connect
+	deferred := isPlaylistRequest(url)
+	if deferred {
+		if err := e.DeferCreateMessage(false); err != nil {
+			return err
+		}
+	}
+
+	err := d.play(ctx, e.GuildID().String(), e.User().ID.String(), url)
+	if deferred {
+		if err != nil {
+			return d.answerDeferred(e, err.Error())
+		}
+		return d.answerDeferred(e, fmt.Sprintf("added %s", url))
+	}
 	if err != nil {
 		return err
 	}
@@ -67,6 +147,124 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 	return e.CreateMessage(discord.MessageCreate{
 		Content: fmt.Sprintf("added %s", url),
 	})
+}
+
+func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	// every /playlist run does cache lookups, a voice connect and a queue walk, so it
+	// is always deferred, with or without update:true
+	if err := e.DeferCreateMessage(false); err != nil {
+		return err
+	}
+	answer := func(res queueResult, err error) error {
+		if err != nil {
+			return d.answerDeferred(e, err.Error())
+		}
+		return d.answerDeferred(e, playlistQueuedMsg(res))
+	}
+
+	data := e.SlashCommandInteractionData()
+	rawID := data.String("name")
+	update := data.Bool("update")
+
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return d.answerDeferred(e, fmt.Sprintf("unknown playlist '%s'", rawID))
+	}
+
+	gID := e.GuildID().String()
+	pl, err := d.Store.GetPlaylist(ctx, store.GetPlaylistParams{ID: id, GuildID: gID})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return d.answerDeferred(e, ErrPlaylistNotFound.Error())
+		}
+		return d.answerDeferred(e, fmt.Sprintf("lookup playlist: %v", err))
+	}
+
+	if update {
+		pl, err = d.syncPlaylist(ctx, pl)
+		if err != nil {
+			// no stale-snapshot fallback: the user asked for a sync that failed
+			return d.answerDeferred(e, err.Error())
+		}
+	}
+
+	err = d.connectVoice(snowflake.MustParse(gID), snowflake.MustParse(e.User().ID.String()))
+	if err != nil {
+		return answer(queueResult{}, err)
+	}
+
+	res, err := d.queueSnapshot(ctx, gID, pl.ID)
+	if err != nil {
+		return answer(queueResult{}, err)
+	}
+	if res.queued == 0 {
+		return d.answerDeferred(e, ErrNoPlayableEntries.Error())
+	}
+	return answer(res, nil)
+}
+
+// playlistQueuedMsg reports queue and cache separately: "queued N" alone hides whether
+// the media is local, still downloading, or could not be cached at all.
+func playlistQueuedMsg(res queueResult) string {
+	msg := fmt.Sprintf("queued %d entries", res.queued)
+	if res.cached > 0 {
+		msg += fmt.Sprintf(", %d from cache", res.cached)
+	}
+	if res.waiting > 0 {
+		msg += fmt.Sprintf(", %d waiting for cache", res.waiting)
+	}
+	if res.unscheduled > 0 {
+		msg += fmt.Sprintf(", %d could not be cached", res.unscheduled)
+	}
+	if res.unavailable > 0 {
+		msg += fmt.Sprintf(", %d unavailable", res.unavailable)
+	}
+	return msg
+}
+
+// ErrNotAuthorized is returned when a guild-administrator command is invoked by
+// someone who is not one, or outside a guild.
+var ErrNotAuthorized = errors.New("you need to be a server administrator")
+
+// isGuildAdmin re-checks the permission at runtime. Command registration is only a
+// UI hint, so it can never be what authorizes the mutation.
+func isGuildAdmin(e *events.ApplicationCommandInteractionCreate) bool {
+	if e.GuildID() == nil {
+		return false
+	}
+	member := e.Member()
+	if member == nil {
+		return false
+	}
+	return member.Permissions.Has(discord.PermissionAdministrator)
+}
+
+func (d *DBot) handlePlaylistDelete(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	// defer first: the handler always looks the playlist up before answering
+	if err := e.DeferCreateMessage(true); err != nil {
+		return err
+	}
+
+	if !isGuildAdmin(e) {
+		return d.answerDeferred(e, ErrNotAuthorized.Error())
+	}
+
+	id, err := strconv.ParseInt(e.SlashCommandInteractionData().String("name"), 10, 64)
+	if err != nil {
+		return d.answerDeferred(e, "unknown playlist")
+	}
+
+	title, err := d.deletePlaylist(ctx, id, e.GuildID().String())
+	if err != nil {
+		if errors.Is(err, ErrPlaylistNotFound) || errors.Is(err, sql.ErrNoRows) {
+			// covers "does not exist", "another guild" and "already deleted" without
+			// telling the caller which
+			return d.answerDeferred(e, "playlist not found")
+		}
+		return d.answerDeferred(e, "could not delete playlist")
+	}
+
+	return d.answerDeferred(e, fmt.Sprintf("Deleted playlist %q. Cached videos were kept.", title))
 }
 
 func (d *DBot) handleWypierdalaj(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
@@ -191,7 +389,7 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 	}
 
 	// if download succeded backup file
-	go saveVideoInDir(d, url, e.GuildID().String(), "tomp4")
+	go d.saveVideoInDir(url, e.GuildID().String(), "tomp4")
 
 	f, err := os.Open(info.Filepath)
 	if err != nil {

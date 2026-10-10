@@ -10,6 +10,17 @@ import (
 	"database/sql"
 )
 
+const countQueueByJobType = `-- name: CountQueueByJobType :one
+SELECT count(*) FROM queue WHERE job_type = ?1
+`
+
+func (q *Queries) CountQueueByJobType(ctx context.Context, jobType string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countQueueByJobType, jobType)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const enqueue = `-- name: Enqueue :one
 INSERT INTO queue (meta,fail_count,last_msg,status,job_type)
 VALUES (
@@ -51,9 +62,11 @@ func (q *Queries) Enqueue(ctx context.Context, arg EnqueueParams) (Queue, error)
 
 const findFailedTasksInQueue = `-- name: FindFailedTasksInQueue :many
 SELECT id, fail_count, status, job_type, meta, last_msg FROM queue
-WHERE status != 'done' and fail_count = 5 order by id asc
+WHERE status NOT IN ('done', 'unavailable') and fail_count >= 3 order by id asc
 `
 
+// >= so that rows written under the old 5-attempt policy (fail_count 4 or 5) stay
+// visible as exhausted instead of vanishing
 func (q *Queries) FindFailedTasksInQueue(ctx context.Context) ([]Queue, error) {
 	rows, err := q.db.QueryContext(ctx, findFailedTasksInQueue)
 	if err != nil {
@@ -84,11 +97,41 @@ func (q *Queries) FindFailedTasksInQueue(ctx context.Context) ([]Queue, error) {
 	return items, nil
 }
 
-const nextInQueue = `-- name: NextInQueue :one
+const latestJob = `-- name: LatestJob :one
 SELECT id, fail_count, status, job_type, meta, last_msg FROM queue
-WHERE status != 'done' and fail_count < 5 order by id asc
+WHERE job_type = ?1 AND meta = ?2
+ORDER BY id DESC
+LIMIT 1
 `
 
+type LatestJobParams struct {
+	JobType string
+	Meta    string
+}
+
+// The *latest* job for this exact metadata decides the current state of that video.
+// Older terminal rows must not outvote a newer record.
+func (q *Queries) LatestJob(ctx context.Context, arg LatestJobParams) (Queue, error) {
+	row := q.db.QueryRowContext(ctx, latestJob, arg.JobType, arg.Meta)
+	var i Queue
+	err := row.Scan(
+		&i.ID,
+		&i.FailCount,
+		&i.Status,
+		&i.JobType,
+		&i.Meta,
+		&i.LastMsg,
+	)
+	return i, err
+}
+
+const nextInQueue = `-- name: NextInQueue :one
+SELECT id, fail_count, status, job_type, meta, last_msg FROM queue
+WHERE status NOT IN ('done', 'unavailable') and fail_count < 3 order by id asc
+`
+
+// 'unavailable' is a terminal status too: without it a permanently failed job stays
+// eligible (fail_count never moved) and the runner picks it up again forever.
 func (q *Queries) NextInQueue(ctx context.Context) (Queue, error) {
 	row := q.db.QueryRowContext(ctx, nextInQueue)
 	var i Queue

@@ -29,6 +29,26 @@ type Channel struct {
 	DeletedAt sql.NullTime
 }
 
+type Playlist struct {
+	ID                int64
+	GuildID           string
+	YoutubePlaylistID string
+	Title             string
+	YoutubeUrl        string
+	CreatedAt         sql.NullTime
+	LastSyncedAt      sql.NullTime
+	DeletedAt         sql.NullTime
+}
+
+type PlaylistEntry struct {
+	ID             int64
+	PlaylistID     int64
+	YoutubeVideoID sql.NullString
+	YoutubeUrl     string
+	Title          string
+	Position       int64
+}
+
 type Queue struct {
 	ID        int64
 	FailCount int64

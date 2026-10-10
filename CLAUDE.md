@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-dbot is a Go Discord bot (module `dbot`, go 1.26) for a single guild: plays music/sounds from YouTube, records a backup of guild attachments/messages with perceptual-hash dedupe, transcodes video for Discord's upload limits, and manages playlists.
+dbot is a Go Discord bot (module `dbot`, go 1.26) for a single guild: plays music/sounds from YouTube, records a backup of guild attachments/messages with perceptual-hash dedupe, transcodes video for Discord's upload limits, and keeps snapshots of YouTube playlists.
 
 **Branch state**: `master` still uses `github.com/bwmarrin/discordgo` (via a `replace` to a private fork, `github.com/yeongaori/discordgo`, that adds real DAVE/E2EE voice support upstream discordgo lacks). Branch `rewrite-to-disgo` has migrated the whole bot to `github.com/disgoorg/disgo` + real libdave-backed DAVE encryption. Check `git branch --show-current` before assuming which API surface (`discordgo` vs `disgo`) a file uses — don't assume `master`'s shape when editing the migration branch, or vice versa.
 
@@ -26,10 +26,8 @@ CGO_ENABLED=1 go build ./...
 
 ### Tests
 ```bash
-go test ./...                      # pkg/player's TestPlaylist hangs — pre-existing bug (list.next() deadlocks
-                                    # on a cap-1 channel with nothing draining it); not caused by any migration work
-go test -v -run TestPlaylist ./pkg/player
-go test -race ./...
+go test ./...                      # pkg/player holds no tests (the old hanging TestPlaylist is gone)
+go test -race ./...                # needs libdave's pkg-config, see above
 go test -cover ./...
 ```
 
@@ -38,15 +36,16 @@ go test -cover ./...
 go vet ./...
 go fmt ./...
 go tool goose ...                  # migration tool, works via go.mod `tool` directive
-go tool sqlc generate              # currently fails to build on this toolchain (sqlc-dev/sqlc@v1.29.0
-                                    # internal dolphin engine compile error) — unrelated to this repo's code
+sqlc generate                      # works with sqlc v1.27.0 on this toolchain.
+                                    # Migrations are up-only by convention - a `-- +goose down` section
+                                    # gets replayed as if it were up and corrupts the generated schema
 ```
 
 ## Architecture
 
 ### Three independent SQLite databases
 Configured in one `sqlc.yaml` (3 separate `sql:` entries) but each is its own file, schema, and generated Go package — there is no cross-DB joining:
-- **store** (`pkg/store`, schema `db/migrations/`, queries `db/queries/*.sql`) — main app data: channel mappings, sounds, playlists, the job queue table. Opened via `db.ConnectStore` at `$DB_DIR/<filename>`.
+- **store** (`pkg/store`, schema `db/migrations/`, queries `db/queries/*.sql`) — main app data: channel mappings, sounds, playlists + playlist entries, the job queue table. Opened via `db.ConnectStore` at `$DB_DIR/<filename>`, which returns `*db.Store` — `store.Queries` embedded plus the `*sql.DB`, so `WithTx` can run a transaction (the DB has `MaxOpenConns(1)`: only ever use the tx-bound queries inside a transaction).
 - **backup** (`pkg/backup`, schema `db/backup/`, queries `db/backup-queries/*.sql`) — attachment/message backup + perceptual-hash dedupe records. Opened via `db.ConnectBackup` at `$BACKUP_DIR/<filename>`.
 - **cache** (`pkg/cache`, schema `db/cache/`, queries `db/cache-queries/*.sql`) — audio cache. Opened via `db.ConnectAudioCache` at `$TMP_PATH/<filename>`.
 
@@ -55,7 +54,7 @@ All three connection functions live in `pkg/db/db.go`, each: opens with `modernc
 sqlc output is generated code — never hand-edit `pkg/store`, `pkg/backup`, `pkg/cache`. Edit the `.sql` files under `db/` and `db/*-queries/`, then regenerate.
 
 ### Job queue (`pkg/job_runner`)
-A single polling loop (`Runner.Loop`), not a worker pool: pulls one row at a time from `store.NextInQueue`, dispatches by `JobType` string key to a handler registered via `RegisterJob`, writes status back (`done`/`failing` + `FailCount`), sleeps 5s on empty queue or error. Two job types are registered in `pkg/bot/bot.go`'s `Start`: `DownloadJob` and `BackupJob` (handlers in `pkg/bot/jobs.go`).
+A single polling loop (`Runner.Loop`), not a worker pool: pulls one row at a time from `store.NextInQueue`, dispatches by `JobType` string key to a handler registered via `RegisterJob`, writes status back (`done`/`failing` + `FailCount`), sleeps 5s on empty queue or error. One job type is registered in `pkg/bot/bot.go`'s `Start`: `BackupJob` (handler `backupVideoJob` in `pkg/bot/jobs.go`), which re-checks the shared artefact index before downloading so duplicate jobs are cheap no-ops.
 
 ### Player (`pkg/player`)
 Two independent goroutine loops started in `NewPlayer()`:
@@ -81,7 +80,13 @@ flattening struct-valued attrs into dotted `Key.Field=value` lines (recursing in
 `pkg/db`'s per-query SQL logging (`pkg/db/db.go`'s `logger()` helper) uses `logger.LevelSQL` (`slog.LevelDebug - 4`, rendered as `SQL`), one step below `Debug` — set `LOG_LEVEL=sql` to see it; the default `LOG_LEVEL=debug` hides SQL query spam but keeps everything else at Debug.
 
 ### Backup & dedupe (`pkg/bot/backup.go`)
-`BackupAttachment` downloads every message attachment, computes a perceptual image hash (`goimagehash.DifferenceHash`, PNG/JPEG/WEBP only) and checks it against prior hashes in the backup DB (`checkHashAgainstDB`, paginated, distance ≤ 3 = dupe) before storing. Files land under `$BACKUP_DIR/<guild_id>/<dirs>/<name>`.
+`BackupAttachment` downloads every message attachment, computes a perceptual image hash (`goimagehash.DifferenceHash`, PNG/JPEG/WEBP only) and checks it against prior hashes in the backup DB (`checkHashAgainstDB`, paginated, distance ≤ 3 = dupe) before storing. Files land under `$BACKUP_DIR/<guild_id>/<dirs>/<name>` and `artefacts.path` is stored **relative** to `$BACKUP_DIR` (`filepath.Rel` — an earlier `strings.TrimLeft` produced unusable paths).
+
+### YouTube playlists (`pkg/bot/playlists.go`, `pkg/bot/yturl.go`)
+- `playlists` is keyed by `(guild_id, youtube_playlist_id)`; title is metadata only, so renaming on YouTube never forks a playlist. `playlist_entries` stores membership + position only — no file paths, no download state.
+- `/play <playlist url>` registers an unknown playlist with a full snapshot; a known one plays the **saved** snapshot. `/playlist name:<id> [update:true]` always plays the saved snapshot unless `update:true` explicitly re-syncs.
+- Snapshot writes go through `db.Store.WithTx` (upsert playlist → delete entries → insert positions → `last_synced_at`). No network I/O inside the transaction.
+- One shared video cache: `cachedVideo` (`pkg/bot/videocache.go`) looks up the canonical `https://www.youtube.com/watch?v=ID` in the backup DB, verifies the file exists, and otherwise enqueues a `BackupJob`. Playlists do not own files; removing an entry never deletes an artefact.
 
 ### ffmpeg (`pkg/ffmpeg`)
 `ToDiscordMP4`/`ToDiscordGIF` compute a target bitrate from `DiscordMaxFileSizeBytes` (20 MiB) and clip duration, re-encoding only when needed (oversized, muted, clipped, or HEVC — `HasHEVCVideo` via `ffprobe`). `FFMPEG_HW_ACCEL` env var toggles Intel QSV hardware acceleration (`h264_qsv`, seen as `-init_hw_device qsv=hw`).

@@ -2,7 +2,7 @@ package dbot
 
 import (
 	"context"
-	"encoding/json"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,15 +27,27 @@ import (
 )
 
 type DBot struct {
-	Ctx    context.Context
-	Store  *store.Queries
-	Backup *backup.Queries
+	Ctx   context.Context
+	Store *store.Queries
+	// StoreDB is Store plus the connection, used for transactional snapshot writes.
+	StoreDB *db.Store
+	Backup  *backup.Queries
 
 	Client  *bot.Client
 	GuildID snowflake.ID
 	ytdlp.YTDLP
+	// PlaylistInfoFunc fetches playlist metadata; nil means use yt-dlp.
+	PlaylistInfoFunc func(link string) (ytdlp.PlaylistMeta, error)
 	// MusicPlayer is for plaing stuff from YT and others
 	MusicPlayer *player.Player
+}
+
+// playlistInfo is the single place playlist metadata is fetched, so tests can stub it.
+func (d *DBot) playlistInfo(link string) (ytdlp.PlaylistMeta, error) {
+	if d.PlaylistInfoFunc != nil {
+		return d.PlaylistInfoFunc(link)
+	}
+	return d.PlaylistInfo(link)
 }
 
 func dbotErr(msg string, vars ...any) error {
@@ -66,7 +78,7 @@ func startJobRunner(ctx context.Context, db *store.Queries) jobrunner.Runner {
 	return runner
 }
 
-func Start(ctx context.Context, client *bot.Client, dbstore *store.Queries) *DBot {
+func Start(ctx context.Context, client *bot.Client, dbstore *db.Store) *DBot {
 	backupDB, err := db.ConnectBackup(ctx, "backup.db", "")
 	if err != nil {
 		panic(err)
@@ -77,11 +89,12 @@ func Start(ctx context.Context, client *bot.Client, dbstore *store.Queries) *DBo
 		Client:      client,
 		GuildID:     snowflake.MustParse(config.GUILD_ID),
 		MusicPlayer: player.NewPlayer(),
-		Store:       dbstore,
+		Store:       dbstore.Queries,
+		StoreDB:     dbstore,
 		Backup:      backupDB,
 	}
 
-	runner := startJobRunner(ctx, dbstore)
+	runner := startJobRunner(ctx, dbstore.Queries)
 	runner.RegisterJob(BackupJob, d.backupVideoJob)
 
 	// Listeners must be registered befor we open connection
@@ -286,7 +299,7 @@ func isValidUrl(s string) bool {
 	return err == nil && u.Host != ""
 }
 
-func (d *DBot) play(gID, uID string, url string) error {
+func (d *DBot) play(ctx context.Context, gID, uID string, url string) error {
 	err := d.connectVoice(snowflake.MustParse(gID), snowflake.MustParse(uID))
 	if err != nil {
 		return err
@@ -299,19 +312,27 @@ func (d *DBot) play(gID, uID string, url string) error {
 			return fmt.Errorf("failed searching: %w", err)
 		}
 
-	case strings.Contains(url, "/playlist") || strings.Contains(url, "&list="):
-		err := d.playFromYTPlaylist(url, gID)
-		if err != nil {
-			return fmt.Errorf("failed load playlist: %w", err)
-		}
-
 	default:
-		art, err := d.Backup.GetArtefact(d.Ctx, url)
+		link, ok := parseYTLink(url)
+		if ok && link.Playlist {
+			err := d.playPlaylistURL(ctx, gID, link.PlaylistID)
+			if err != nil {
+				return fmt.Errorf("failed load playlist: %w", err)
+			}
+			return nil
+		}
+		if ok {
+			url = canonicalVideoURL(link.VideoID)
+		}
+		path, found, err := d.cachedVideo(ctx, "", url)
 		if err != nil {
-			go saveVideoInDir(d, url, gID, "play_history")
+			slog.Error("artefact lookup failed", slog.Any("error", err), slog.String("url", url))
+		} else if found {
+			slog.Debug("play: artefact already exists", slog.String("path", path))
+			url = path
 		} else {
-			slog.Debug("playHistory: artefact already exists")
-			url = art.Path
+			slog.Debug("play: not cached, queueing source and scheduling backup", slog.String("url", url))
+			go d.saveVideoInDir(url, gID, videoBackupDir)
 		}
 
 		d.MusicPlayer.Add(url)
@@ -320,62 +341,40 @@ func (d *DBot) play(gID, uID string, url string) error {
 	return nil
 }
 
-func saveVideoInDir(d *DBot, url string, gID string, dir string) {
-	slog.Debug("saveInPlayHistory", slog.String("url", url), slog.String("gid", gID))
-	meta := BackupFileParams{
-		OriginUrl:   url,
-		GID:         gID,
-		Dirs:        dir,
-		PrependTime: false,
-		File:        nil,
-	}
-
-	jsonMeta, err := json.Marshal(meta)
-	if err != nil {
-		slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
-		return
-	}
-
-	_, err = d.Store.Enqueue(d.Ctx, store.EnqueueParams{
-		Meta:    string(jsonMeta),
-		JobType: BackupJob,
+// playPlaylistURL queues a playlist from a /play url. An unknown playlist is registered
+// with its initial snapshot; a known one plays its saved snapshot without syncing.
+func (d *DBot) playPlaylistURL(ctx context.Context, gID, playlistID string) error {
+	pl, err := d.Store.GetPlaylistByYoutubeID(ctx, store.GetPlaylistByYoutubeIDParams{
+		GuildID:           gID,
+		YoutubePlaylistID: playlistID,
 	})
-	if err != nil {
-		slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
+	if err == nil {
+		_, err = d.queueSnapshot(ctx, gID, pl.ID)
+		return err
 	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("lookup playlist: %w", err)
+	}
+
+	// first time this playlist is seen: register it and save the initial snapshot
+	meta, err := d.playlistInfo(canonicalPlaylistURL(playlistID))
+	if err != nil {
+		return fmt.Errorf("failed getting playlist info: %w", err)
+	}
+	if meta.ID != playlistID {
+		return fmt.Errorf("%w: got '%s', want '%s'", ErrPlaylistIDMismatch, meta.ID, playlistID)
+	}
+	pl, err = d.saveSnapshot(ctx, gID, meta, true)
+	if err != nil {
+		return err
+	}
+
+	_, err = d.queueSnapshot(ctx, gID, pl.ID)
+	return err
 }
 
 func (d *DBot) searchAndPlay(url string) error {
 	url = fmt.Sprintf(`ytsearch:"%s"`, url)
 	d.MusicPlayer.Add(url)
-	return nil
-}
-
-func (d *DBot) playFromYTPlaylist(url string, gID string) error {
-	info, err := d.PlaylistInfo(url)
-	if err != nil {
-		return fmt.Errorf("failed getting playlist info: %w", err)
-	}
-
-	slog.Debug("adding tracks from playlist", slog.Int("len", len(info.Entries)))
-	for i := range info.Entries {
-		if info.Entries[i].Duration == nil {
-			slog.Debug(
-				"skipping due to null duration, probably deleted vid",
-				slog.String("title", info.Entries[i].Title),
-				slog.String("url", info.Entries[i].URL),
-			)
-			continue
-		}
-		u := info.Entries[i].URL
-		art, err := d.Backup.GetArtefact(d.Ctx, u)
-		if err != nil {
-			go saveVideoInDir(d, u, gID, "play_history")
-		} else {
-			u = art.Path
-		}
-		d.MusicPlayer.Add(u)
-	}
-
 	return nil
 }

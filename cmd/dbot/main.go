@@ -12,7 +12,6 @@ import (
 	"dbot/pkg/config"
 	"dbot/pkg/db"
 	"dbot/pkg/logger"
-	"dbot/pkg/store"
 	"dbot/pkg/ytdlp"
 
 	"github.com/disgoorg/disgo"
@@ -38,7 +37,7 @@ func main() {
 	bot(ctx, db)
 }
 
-func bot(ctx context.Context, db *store.Queries) {
+func bot(ctx context.Context, db *db.Store) {
 	client, err := disgo.New(config.TOKEN,
 		disgobot.WithLogger(logger.New(os.Stdout, slog.LevelWarn)),
 		disgobot.WithEventManagerConfigOpts(

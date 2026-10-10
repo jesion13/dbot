@@ -31,6 +31,7 @@ func (d *DBot) RegisterEventListiners() {
 		bot.NewListenerFunc(d.messagesEditListener),
 		bot.NewListenerFunc(d.onUserVoiceStateChange),
 		bot.NewListenerFunc(d.messageDeleteListener),
+		bot.NewListenerFunc(d.playlistAutocomplete),
 	)
 }
 
@@ -63,6 +64,12 @@ func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(e *events.Applic
 						Content: "Voice is disabled",
 						Flags:   discord.MessageFlagEphemeral,
 					})
+					return
+				}
+				// a deferred handler already wrote the final response; sending another
+				// initial response here would fail (or double-post)
+				if errors.Is(err, ErrInteractionAnswered) {
+					slog.Debug("handler answered the interaction itself", slog.String("cmd", name))
 					return
 				}
 				slog.Error("uuu duuuuuuuuuuuuuuuuuupa", slog.Any("error", err), slog.String("cmd", name), slog.String("err_type", fmt.Sprintf("%T", err)))

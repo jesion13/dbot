@@ -12,6 +12,17 @@ WHERE msg_id = :msg_id;
 INSERT INTO artefacts (origin_url,path, media_type, hash, created_at,gid,chid,msgid)
 VALUES (:origin_url,:path, :media_type, :hash, :created_at, :gid, :chid, :msgid);
 
+-- repairs an existing artefact instead of failing on the origin_url primary key
+-- name: RepairArtefact :exec
+UPDATE artefacts
+SET path = :path,
+    media_type = :media_type,
+    hash = :hash,
+    gid = :gid,
+    chid = :chid,
+    msgid = :msgid
+WHERE origin_url = :origin_url;
+
 -- name: GetArtefacts :many
 SELECT * FROM artefacts 
 WHERE 

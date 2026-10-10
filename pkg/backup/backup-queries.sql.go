@@ -147,6 +147,41 @@ func (q *Queries) InsertBackup(ctx context.Context, arg InsertBackupParams) erro
 	return err
 }
 
+const repairArtefact = `-- name: RepairArtefact :exec
+UPDATE artefacts
+SET path = ?1,
+    media_type = ?2,
+    hash = ?3,
+    gid = ?4,
+    chid = ?5,
+    msgid = ?6
+WHERE origin_url = ?7
+`
+
+type RepairArtefactParams struct {
+	Path      string
+	MediaType string
+	Hash      int64
+	Gid       string
+	Chid      string
+	Msgid     string
+	OriginUrl string
+}
+
+// repairs an existing artefact instead of failing on the origin_url primary key
+func (q *Queries) RepairArtefact(ctx context.Context, arg RepairArtefactParams) error {
+	_, err := q.db.ExecContext(ctx, repairArtefact,
+		arg.Path,
+		arg.MediaType,
+		arg.Hash,
+		arg.Gid,
+		arg.Chid,
+		arg.Msgid,
+		arg.OriginUrl,
+	)
+	return err
+}
+
 const updateBackupMsg = `-- name: UpdateBackupMsg :exec
 UPDATE msg_backup SET content = ?1
 WHERE msg_id = ?2

@@ -57,7 +57,7 @@ func ConnectAudioCache(ctx context.Context, filename string, schema string) (*ca
 	return cache.New(d), nil
 }
 
-func ConnectStore(ctx context.Context, filename string, schema string) (*store.Queries, error) {
+func ConnectStore(ctx context.Context, filename string, schema string) (*Store, error) {
 	slog.Debug("[dupa]", slog.String("filepath.Join(config.DB_DIR, filename)", filepath.Join(config.DB_DIR, filename)))
 	w, err := sql.Open("sqlite", filepath.Join(config.DB_DIR, filename))
 	if err != nil {
@@ -95,7 +95,34 @@ func ConnectStore(ctx context.Context, filename string, schema string) (*store.Q
 		w: w,
 	}
 	d.configure()
-	return store.New(d), nil
+	return &Store{Queries: store.New(d), conn: w}, nil
+}
+
+// Store is store.Queries plus the connection, so callers can run a transaction
+// without a global db handle.
+type Store struct {
+	*store.Queries
+	conn *sql.DB
+}
+
+// WithTx runs fn inside a transaction. fn gets queries bound to the tx, so all of
+// its statements commit or roll back together. It must not do network work.
+func (s *Store) WithTx(ctx context.Context, fn func(*store.Queries) error) error {
+	tx, err := s.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if err := fn(s.Queries.WithTx(tx)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Close releases the underlying connection.
+func (s *Store) Close() error {
+	return s.conn.Close()
 }
 
 func ConnectBackup(ctx context.Context, filename, password string) (*backup.Queries, error) {

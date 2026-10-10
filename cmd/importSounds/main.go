@@ -19,8 +19,9 @@ func main() {
 	}
 
 	d := dbot.DBot{
-		Ctx:   ctx,
-		Store: db,
+		Ctx:     ctx,
+		Store:   db.Queries,
+		StoreDB: db,
 	}
 
 	for k, v := range parse() {
