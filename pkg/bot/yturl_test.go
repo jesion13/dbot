@@ -51,3 +51,41 @@ func TestCanonicalURLs(t *testing.T) {
 	assert.Equal(t, "https://www.youtube.com/watch?v=abc", canonicalVideoURL("abc"))
 	assert.Equal(t, "https://www.youtube.com/playlist?list=PL1", canonicalPlaylistURL("PL1"))
 }
+
+func TestParseYTLinkPlaylistForms(t *testing.T) {
+	// only the real playlist route is a playlist request
+	playlistURLs := []string{
+		"https://www.youtube.com/playlist?list=PL1",
+		"https://youtube.com/playlist?list=PL1",
+		"https://m.youtube.com/playlist?list=PL1",
+		"https://music.youtube.com/playlist?list=PL1",
+	}
+	for _, u := range playlistURLs {
+		t.Run(u, func(t *testing.T) {
+			link, ok := parseYTLink(u)
+			require.True(t, ok)
+			assert.True(t, link.Playlist)
+			assert.Equal(t, "PL1", link.PlaylistID)
+		})
+	}
+
+	// list= on some other youtube route is not a playlist
+	for _, u := range []string{
+		"https://www.youtube.com/watch?list=PL1",
+		"https://www.youtube.com/results?search_query=x&list=PL1",
+		"https://www.youtube.com/channel/UC123?list=PL1",
+		"https://www.youtube.com/feed/subscriptions?list=PL1",
+	} {
+		t.Run(u, func(t *testing.T) {
+			_, ok := parseYTLink(u)
+			assert.False(t, ok, "%s must not be treated as a playlist", u)
+		})
+	}
+
+	// v= still wins when the path is /playlist
+	link, ok := parseYTLink("https://www.youtube.com/playlist?list=PL1&v=abc")
+	if ok {
+		assert.False(t, link.Playlist, "a url with a video id is a single-video request")
+		assert.Equal(t, "abc", link.VideoID)
+	}
+}

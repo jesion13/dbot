@@ -120,6 +120,11 @@ func (s *Store) WithTx(ctx context.Context, fn func(*store.Queries) error) error
 	return tx.Commit()
 }
 
+// Close releases the underlying connection.
+func (s *Store) Close() error {
+	return s.conn.Close()
+}
+
 func ConnectBackup(ctx context.Context, filename, password string) (*backup.Queries, error) {
 	w, err := sql.Open("sqlite", filepath.Join(config.BACKUP_DIR, filename))
 	if err != nil {

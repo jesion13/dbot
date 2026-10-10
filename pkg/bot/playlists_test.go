@@ -5,16 +5,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	migrations "dbot/db"
 	"dbot/pkg/backup"
 	"dbot/pkg/config"
 	"dbot/pkg/db"
+	jobrunner "dbot/pkg/job_runner"
 	"dbot/pkg/player"
 	"dbot/pkg/store"
 	"dbot/pkg/ytdlp"
@@ -441,10 +444,13 @@ func TestAppendEntriesOrderAndCache(t *testing.T) {
 	// 'b' is already cached and must be queued as a local file
 	tb.writeArtefactFile(t, canonicalVideoURL("b"), testGID+"/play_history/b.mp4")
 
-	links, pending, unavailable, err := tb.planQueue(ctx, testGID, entries)
+	links, res, err := tb.planQueue(ctx, testGID, entries)
 	require.NoError(t, err)
-	assert.Equal(t, 2, pending)
-	assert.Equal(t, 0, unavailable)
+	assert.Equal(t, 3, res.queued)
+	assert.Equal(t, 1, res.cached, "b plays from local media")
+	assert.Equal(t, 2, res.waiting)
+	assert.Equal(t, 0, res.unscheduled)
+	assert.Equal(t, 0, res.unavailable)
 	require.Len(t, links, 3)
 	assert.Equal(t, canonicalVideoURL("a"), links[0])
 	assert.Equal(t, testGID+"/play_history/b.mp4", links[1], "cached video plays from disk")
@@ -464,11 +470,12 @@ func TestAppendEntriesSkipsMissingFile(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	links, pending, _, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
+	links, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
 	require.NoError(t, err)
 	assert.Len(t, links, 1, "the source url is queued instead")
 	assert.Equal(t, canonicalVideoURL("a"), links[0])
-	assert.Equal(t, 1, pending, "broken artefact must be repaired in the background")
+	assert.Equal(t, 1, res.waiting, "broken artefact must be repaired in the background")
+	assert.Equal(t, 0, res.cached)
 }
 
 func TestAppendEntriesOneBadEntryDoesNotBlock(t *testing.T) {
@@ -483,10 +490,11 @@ func TestAppendEntriesOneBadEntryDoesNotBlock(t *testing.T) {
 	entries[0].YoutubeUrl = ""
 	entries[0].YoutubeVideoID.String = ""
 
-	links, _, unavailable, err := tb.planQueue(ctx, testGID, entries)
+	links, res, err := tb.planQueue(ctx, testGID, entries)
 	require.NoError(t, err)
 	assert.Equal(t, 2, len(links))
-	assert.Equal(t, 1, unavailable)
+	assert.Equal(t, 1, res.unavailable)
+	assert.Equal(t, 2, res.waiting)
 }
 
 func TestCachedVideoLookup(t *testing.T) {
@@ -526,27 +534,7 @@ func TestCachedVideoLookup(t *testing.T) {
 	})
 }
 
-func TestPlanQueueSchedulesBackups(t *testing.T) {
-	tb := newTestBot(t)
-	ctx := tb.Ctx
-
-	pl, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a", "b"), false)
-	require.NoError(t, err)
-
-	_, pending, _, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
-	require.NoError(t, err)
-	assert.Equal(t, 2, pending)
-	assert.Equal(t, int64(2), tb.queueLen(t))
-
-	tb.writeArtefactFile(t, canonicalVideoURL("a"), testGID+"/play_history/a.mp4")
-	links, pending, _, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
-	require.NoError(t, err)
-	assert.Equal(t, 0, pending, "nothing new to download: a is cached, b was already queued")
-	assert.Equal(t, testGID+"/play_history/a.mp4", links[0])
-	assert.Equal(t, int64(2), tb.queueLen(t), "neither a cached nor b may queue another job")
-}
-
-func TestPlanQueueSkipsAlreadyAttemptedVideos(t *testing.T) {
+func TestBackupJobSchedulingByJobState(t *testing.T) {
 	tb := newTestBot(t)
 	ctx := tb.Ctx
 
@@ -554,17 +542,84 @@ func TestPlanQueueSkipsAlreadyAttemptedVideos(t *testing.T) {
 	require.NoError(t, err)
 	entries := tb.entries(t, pl.ID)
 
-	_, pending, _, err := tb.planQueue(ctx, testGID, entries)
+	_, res, err := tb.planQueue(ctx, testGID, entries)
 	require.NoError(t, err)
-	assert.Equal(t, 2, pending)
+	assert.Equal(t, 2, res.waiting)
 	require.Equal(t, int64(2), tb.queueLen(t))
 
-	// the queue keeps rows forever, so the second run must not re-queue anything:
-	// those videos are cached or permanently gone
-	_, pending, _, err = tb.planQueue(ctx, testGID, entries)
+	t.Run("active job is not duplicated", func(t *testing.T) {
+		// both jobs are still pending, so a second /playlist must not add more
+		_, res, err := tb.planQueue(ctx, testGID, entries)
+		require.NoError(t, err)
+		assert.Equal(t, 2, res.waiting, "still covered by the active jobs")
+		assert.Equal(t, int64(2), tb.queueLen(t))
+	})
+
+	t.Run("completed job allows a new attempt when the file is missing", func(t *testing.T) {
+		markQueueStatus(t, tb, canonicalVideoURL("a"), "done")
+
+		_, res, err := tb.planQueue(ctx, testGID, entries)
+		require.NoError(t, err)
+		assert.Equal(t, 0, res.cached, "no artefact file exists for a")
+		assert.Equal(t, 2, res.waiting)
+		assert.Equal(t, int64(3), tb.queueLen(t), "a finished job with no file must be re-queued")
+	})
+
+	t.Run("exhausted job allows a new attempt", func(t *testing.T) {
+		markQueueStatus(t, tb, canonicalVideoURL("b"), "failing")
+		bumpQueueFailCount(t, tb, canonicalVideoURL("b"), 3)
+
+		_, _, err := tb.planQueue(ctx, testGID, entries)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), tb.queueLen(t), "a job that gave up must be retried")
+	})
+
+	t.Run("unavailable job is never retried", func(t *testing.T) {
+		markQueueStatus(t, tb, canonicalVideoURL("b"), "unavailable")
+
+		_, res, err := tb.planQueue(ctx, testGID, entries)
+		require.NoError(t, err)
+		assert.Equal(t, int64(4), tb.queueLen(t), "a dead video must not get another job")
+		// it is now reported as unavailable rather than queued for playback
+		assert.Equal(t, 1, res.unavailable)
+		assert.Equal(t, 1, res.waiting)
+		assert.Equal(t, res.queued, res.cached+res.waiting+res.unscheduled)
+	})
+}
+
+// rawStore opens a second connection to a test bot's db so a test can write queue
+// state the bot itself only writes through the job runner. It uses tb's own directory
+// rather than the global config, which sibling test bots overwrite.
+func rawStore(t *testing.T, tb *testBot) *sql.DB {
+	t.Helper()
+	raw, err := sql.Open("sqlite", filepath.Join(tb.dir, "test.db"))
 	require.NoError(t, err)
-	assert.Equal(t, 0, pending, "already attempted videos must not be queued again")
-	assert.Equal(t, int64(2), tb.queueLen(t))
+	t.Cleanup(func() { raw.Close() })
+	return raw
+}
+
+// markQueueStatus rewrites the status of every backup job for a video, the way the
+// job runner does.
+func markQueueStatus(t *testing.T, tb *testBot, videoURL, status string) {
+	t.Helper()
+	res, err := rawStore(t, tb).ExecContext(tb.Ctx,
+		`UPDATE queue SET status = ? WHERE job_type = ? AND meta LIKE ?`,
+		status, BackupJob, `%"OriginUrl":"`+videoURL+`"%`)
+	require.NoError(t, err)
+	n, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.NotZero(t, n)
+}
+
+func bumpQueueFailCount(t *testing.T, tb *testBot, videoURL string, n int64) {
+	t.Helper()
+	res, err := rawStore(t, tb).ExecContext(tb.Ctx,
+		`UPDATE queue SET fail_count = ? WHERE job_type = ? AND meta LIKE ?`,
+		n, BackupJob, `%"OriginUrl":"`+videoURL+`"%`)
+	require.NoError(t, err)
+	affected, err := res.RowsAffected()
+	require.NoError(t, err)
+	require.NotZero(t, affected)
 }
 
 func TestIsUnavailableVideo(t *testing.T) {
@@ -578,7 +633,9 @@ func TestIsUnavailableVideo(t *testing.T) {
 		{"private", errors.New("ERROR: [youtube] x: Private video. Sign in"), true},
 		{"tos removal", errors.New("ERROR: [youtube] x: This video has been removed for violating YouTube's Terms of Service"), true},
 		{"deleted", errors.New("ERROR: [youtube] x: This video is no longer available because the account has been terminated"), true},
-		{"age gated", errors.New("ERROR: [youtube] x: Sign in to confirm your age"), true},
+		// a cookie/config problem, not deleted media: must stay retryable
+		{"age gated", errors.New("ERROR: [youtube] x: Sign in to confirm your age"), false},
+		{"sign in required", errors.New("ERROR: [youtube] x: Sign in to confirm you are not a bot"), false},
 		{"transient", errors.New("ERROR: unable to download webpage"), false},
 	}
 	for _, tt := range tests {
@@ -656,10 +713,8 @@ func TestSearchPlaylistsExcludesSoftDeleted(t *testing.T) {
 	require.NoError(t, err)
 
 	// reactivating a soft deleted row must reuse it, not duplicate it
-	raw, err := sql.Open("sqlite", filepath.Join(config.DB_DIR, "test.db"))
-	require.NoError(t, err)
-	defer raw.Close()
-	_, err = raw.ExecContext(ctx, "UPDATE playlists SET deleted_at = '2020-01-01T00:00:00Z' WHERE youtube_playlist_id = 'PL1'")
+	_, err = rawStore(t, tb).ExecContext(ctx,
+		"UPDATE playlists SET deleted_at = '2020-01-01T00:00:00Z' WHERE youtube_playlist_id = 'PL1'")
 	require.NoError(t, err)
 
 	none, err := tb.Store.SearchPlaylists(ctx, store.SearchPlaylistsParams{GuildID: testGID, Title: ""})
@@ -678,4 +733,426 @@ func TestSearchPlaylistsExcludesSoftDeleted(t *testing.T) {
 func TestMain(m *testing.M) {
 	slog.SetDefault(slog.New(slog.DiscardHandler))
 	os.Exit(m.Run())
+}
+
+func TestSnapshotRejectsUnresolvedEntries(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+
+	old, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a", "b", "c"), false)
+	require.NoError(t, err)
+	require.Len(t, tb.entries(t, old.ID), 3)
+
+	// a fetch that lost track of one member must not delete it
+	tb.PlaylistInfoFunc = func(string) (ytdlp.PlaylistMeta, error) {
+		meta := testPlaylistMeta(t, "PL1", "dupa", "a", "b")
+		meta.Entries = append(meta.Entries, struct {
+			ID       string `json:"id"`
+			URL      string `json:"url"`
+			Title    string `json:"title"`
+			Duration *int   `json:"duration"`
+		}{Title: "???"})
+		return meta, nil
+	}
+
+	_, err = tb.syncPlaylist(ctx, old)
+	require.ErrorIs(t, err, ErrPlaylistIncomplete)
+	assert.Len(t, tb.entries(t, old.ID), 3, "the unresolved entry must not be read as a removal")
+}
+
+func TestPlaylistQueuedMsgReportsEveryOutcome(t *testing.T) {
+	msg := playlistQueuedMsg(queueResult{
+		queued: 5, cached: 2, waiting: 2, unscheduled: 1, unavailable: 1,
+	})
+	assert.Equal(t, "queued 5 entries, 2 from cache, 2 waiting for cache, 1 could not be cached, 1 unavailable", msg)
+
+	// nothing queued is still worth explaining
+	assert.Equal(t, "queued 0 entries, 3 unavailable", playlistQueuedMsg(queueResult{unavailable: 3}))
+}
+
+// A permanently failed job keeps its fail_count, so the runner query has to exclude
+// the terminal 'unavailable' status explicitly - otherwise the same row is picked up
+// again immediately and the runner loops forever.
+func TestQueueSkipsUnavailableJobs(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+
+	enqueue := func(url string) int64 {
+		res, err := tb.Store.Enqueue(ctx, store.EnqueueParams{Meta: `{"OriginUrl":"` + url + `"}`, JobType: BackupJob})
+		require.NoError(t, err)
+		return res.ID
+	}
+	id := enqueue("https://www.youtube.com/watch?v=dead")
+
+	next, err := tb.Store.NextInQueue(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, id, next.ID, "a pending job must be picked up")
+
+	err = tb.Store.UpdateQueueEntry(ctx, store.UpdateQueueEntryParams{
+		ID: id, Status: "unavailable", FailCount: 0,
+	})
+	require.NoError(t, err)
+
+	_, err = tb.Store.NextInQueue(ctx)
+	assert.ErrorIs(t, err, sql.ErrNoRows, "an unavailable job must not stay in the run queue")
+
+	failed, err := tb.Store.FindFailedTasksInQueue(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, failed)
+
+	// a done job is skipped too, and only a live one comes back
+	doneID := enqueue("https://www.youtube.com/watch?v=done")
+	err = tb.Store.UpdateQueueEntry(ctx, store.UpdateQueueEntryParams{
+		ID: doneID, Status: "done", FailCount: 0,
+	})
+	require.NoError(t, err)
+	_, err = tb.Store.NextInQueue(ctx)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+
+	liveID := enqueue("https://www.youtube.com/watch?v=live")
+	next, err = tb.Store.NextInQueue(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, liveID, next.ID)
+}
+
+// A video youtube refuses to serve stays in the snapshot, but it must not be queued
+// for playback - doing so only produces a yt-dlp/ffmpeg failure later.
+func TestPlanQueueSkipsKnownUnavailableVideos(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+
+	pl, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a", "b"), false)
+	require.NoError(t, err)
+	entries := tb.entries(t, pl.ID)
+
+	// 'a' is already known to be unavailable, 'b' is not
+	ins, err := rawStore(t, tb).ExecContext(ctx,
+		`INSERT INTO queue (job_type, meta, status, fail_count) VALUES (?, ?, 'unavailable', 0)`,
+		BackupJob, `{"Name":"","Dirs":"play_history","GID":"`+testGID+`","CHID":"","MSGID":"","ContentType":"","OriginUrl":"`+canonicalVideoURL("a")+`","PrependTime":false,"File":null}`)
+	require.NoError(t, err)
+	require.NotZero(t, ins)
+	before := tb.queueLen(t)
+
+	links, qr, err := tb.planQueue(ctx, testGID, entries)
+	require.NoError(t, err)
+	require.Len(t, links, 1, "only the playable entry may be queued")
+	assert.Equal(t, canonicalVideoURL("b"), links[0])
+	assert.Equal(t, 1, qr.unavailable)
+	assert.Equal(t, 1, qr.waiting)
+	assert.Equal(t, before+1, tb.queueLen(t), "only 'b' may get a job; the dead video must not")
+
+	// the entry itself is untouched - membership is not downloadability
+	assert.Len(t, tb.entries(t, pl.ID), 2)
+}
+
+// --- backup state detection -------------------------------------------------
+
+func TestScheduleBackupStates(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+	url := canonicalVideoURL("a")
+
+	t.Run("no history schedules", func(t *testing.T) {
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, url)
+		require.NoError(t, err)
+		assert.Equal(t, backupScheduled, state)
+	})
+
+	t.Run("pending job is not duplicated", func(t *testing.T) {
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, url)
+		require.NoError(t, err)
+		assert.Equal(t, backupPending, state)
+		assert.Equal(t, int64(1), tb.queueLen(t))
+	})
+
+	t.Run("retryable failure stays pending", func(t *testing.T) {
+		markQueueStatus(t, tb, url, "failing")
+		bumpQueueFailCount(t, tb, url, 2)
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, url)
+		require.NoError(t, err)
+		assert.Equal(t, backupPending, state)
+	})
+
+	t.Run("done job allows a new attempt", func(t *testing.T) {
+		markQueueStatus(t, tb, url, "done")
+		before := tb.queueLen(t)
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, url)
+		require.NoError(t, err)
+		assert.Equal(t, backupScheduled, state, "a missing file behind a done job must be repairable")
+		assert.Equal(t, before+1, tb.queueLen(t))
+	})
+
+	t.Run("exhausted job allows a new attempt", func(t *testing.T) {
+		markQueue(t, tb, url, "failing", jobAttempts)
+		before := tb.queueLen(t)
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, url)
+		require.NoError(t, err)
+		assert.Equal(t, backupScheduled, state)
+		assert.Equal(t, before+1, tb.queueLen(t))
+	})
+
+	t.Run("unavailable is terminal", func(t *testing.T) {
+		markQueue(t, tb, url, "unavailable", 0)
+		before := tb.queueLen(t)
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, url)
+		require.NoError(t, err)
+		assert.Equal(t, backupUnavailable, state)
+		assert.Equal(t, before, tb.queueLen(t), "no new job for a dead video")
+	})
+
+	t.Run("an older unavailable row does not outvote a newer one", func(t *testing.T) {
+		markQueue(t, tb, url, "unavailable", 0)
+		// a later attempt was made and is still running: that is the current state
+		markQueue(t, tb, url, "", 0)
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, url)
+		require.NoError(t, err)
+		assert.Equal(t, backupPending, state, "only the latest job decides")
+	})
+
+	t.Run("a newer done row beats an older unavailable one", func(t *testing.T) {
+		markQueue(t, tb, url, "unavailable", 0)
+		markQueue(t, tb, url, "done", 0)
+		before := tb.queueLen(t)
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, url)
+		require.NoError(t, err)
+		assert.Equal(t, backupScheduled, state)
+		assert.Equal(t, before+1, tb.queueLen(t))
+	})
+}
+
+func TestScheduleBackupReportsDbErrors(t *testing.T) {
+	tb := newTestBot(t)
+
+	// close the connection so the lookup fails for real
+	require.NoError(t, tb.store.Close())
+
+	state, err := tb.scheduleBackup(tb.Ctx, testGID, videoBackupDir, canonicalVideoURL("a"))
+	assert.Equal(t, backupError, state, "a db error must never look like a cache hit or a fresh schedule")
+	require.Error(t, err)
+}
+
+// markQueue inserts a job row for a video with an explicit outcome.
+func markQueue(t *testing.T, tb *testBot, videoURL, status string, failCount int64) {
+	t.Helper()
+	meta, err := backupJobMeta(testGID, videoBackupDir, videoURL)
+	require.NoError(t, err)
+	_, err = rawStore(t, tb).ExecContext(tb.Ctx,
+		`INSERT INTO queue (job_type, meta, status, fail_count) VALUES (?, ?, ?, ?)`,
+		BackupJob, meta, status, failCount)
+	require.NoError(t, err)
+}
+
+// --- playback resolution ---------------------------------------------------
+
+// A terminal 'unavailable' job must not stop a usable local copy from playing.
+func TestPlanQueuePlaysCachedFileOfUnavailableVideo(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+
+	pl, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a"), false)
+	require.NoError(t, err)
+	markQueue(t, tb, canonicalVideoURL("a"), "unavailable", 0)
+	tb.writeArtefactFile(t, canonicalVideoURL("a"), testGID+"/play_history/a.mp4")
+
+	links, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, testGID+"/play_history/a.mp4", links[0], "the local file wins over job history")
+	assert.Equal(t, 1, res.cached)
+	assert.Equal(t, 0, res.unavailable)
+}
+
+func TestPlanQueueSkipsUnavailableAndKeepsTheRest(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+
+	pl, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a", "b", "c"), false)
+	require.NoError(t, err)
+	markQueue(t, tb, canonicalVideoURL("b"), "unavailable", 0)
+
+	links, res, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
+	require.NoError(t, err)
+	require.Len(t, links, 2, "one dead entry must not stop the others")
+	assert.NotContains(t, links, canonicalVideoURL("b"))
+	assert.Equal(t, 1, res.unavailable)
+	assert.Equal(t, 2, res.waiting)
+	assert.Equal(t, 2, res.queued, "queued counts what was appended, not what was inspected")
+
+	// membership is untouched by playback decisions
+	assert.Len(t, tb.entries(t, pl.ID), 3)
+}
+
+func TestPlanQueueNeverQueuesMissingPaths(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+
+	pl, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a"), false)
+	require.NoError(t, err)
+	require.NoError(t, tb.Backup.InsertArtefact(ctx, backup.InsertArtefactParams{
+		OriginUrl: canonicalVideoURL("a"), Path: testGID + "/play_history/gone.mp4", MediaType: "video/mp4",
+	}))
+
+	links, _, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, canonicalVideoURL("a"), links[0], "a nonexistent path is never queued")
+}
+
+// --- snapshot validation ---------------------------------------------------
+
+func TestSnapshotValidation(t *testing.T) {
+	t.Run("unavailable video with a valid id stays", func(t *testing.T) {
+		tb := newTestBot(t)
+		meta := testPlaylistMeta(t, "PL1", "dupa", "a")
+		meta.Entries[0].Duration = nil
+		pl, err := tb.saveSnapshot(tb.Ctx, testGID, meta, false)
+		require.NoError(t, err)
+		require.Len(t, tb.entries(t, pl.ID), 1)
+		assert.Equal(t, "a", tb.entries(t, pl.ID)[0].YoutubeVideoID.String)
+	})
+
+	t.Run("positions follow yt-dlp order", func(t *testing.T) {
+		tb := newTestBot(t)
+		pl, err := tb.saveSnapshot(tb.Ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "c", "a", "b", "a"), false)
+		require.NoError(t, err)
+		got := []string{}
+		for _, e := range tb.entries(t, pl.ID) {
+			got = append(got, e.YoutubeVideoID.String)
+		}
+		assert.Equal(t, []string{"c", "a", "b", "a"}, got)
+	})
+
+	t.Run("a failed fetch changes nothing", func(t *testing.T) {
+		tb := newTestBot(t)
+		ctx := tb.Ctx
+		pl, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a", "b"), false)
+		require.NoError(t, err)
+
+		tb.PlaylistInfoFunc = func(string) (ytdlp.PlaylistMeta, error) {
+			return ytdlp.PlaylistMeta{}, errors.New("network down")
+		}
+		_, err = tb.syncPlaylist(ctx, pl)
+		require.Error(t, err)
+
+		again, err := tb.Store.GetPlaylist(ctx, store.GetPlaylistParams{ID: pl.ID, GuildID: testGID})
+		require.NoError(t, err)
+		assert.Equal(t, "dupa", again.Title)
+		assert.False(t, again.LastSyncedAt.Valid, "last_synced_at must not move on a failed sync")
+		assert.Len(t, tb.entries(t, pl.ID), 2)
+	})
+
+	t.Run("syncing does not delete backup artefacts of removed entries", func(t *testing.T) {
+		tb := newTestBot(t)
+		ctx := tb.Ctx
+		pl, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a", "b"), false)
+		require.NoError(t, err)
+		tb.writeArtefactFile(t, canonicalVideoURL("b"), testGID+"/play_history/b.mp4")
+
+		tb.PlaylistInfoFunc = func(string) (ytdlp.PlaylistMeta, error) {
+			return testPlaylistMeta(t, "PL1", "dupa", "a"), nil
+		}
+		_, err = tb.syncPlaylist(ctx, pl)
+		require.NoError(t, err)
+		assert.Len(t, tb.entries(t, pl.ID), 1)
+
+		_, err = tb.Backup.GetArtefact(ctx, canonicalVideoURL("b"))
+		require.NoError(t, err, "removing a video from a playlist must not delete its backup")
+	})
+}
+
+// --- deferred interactions -------------------------------------------------
+
+func TestIsPlaylistRequest(t *testing.T) {
+	assert.True(t, isPlaylistRequest("https://www.youtube.com/playlist?list=PL1"))
+	// known or new, the url shape is what decides
+	assert.True(t, isPlaylistRequest("https://m.youtube.com/playlist?list=PL2"))
+	// single video work is not deferred
+	assert.False(t, isPlaylistRequest("https://www.youtube.com/watch?v=abc"))
+	assert.False(t, isPlaylistRequest("https://youtu.be/abc"))
+	assert.False(t, isPlaylistRequest("not a url"))
+	assert.False(t, isPlaylistRequest("https://example.com/x"))
+}
+
+func TestTruncateKeepsRunesIntact(t *testing.T) {
+	assert.Equal(t, "short", truncate("short"))
+
+	long := strings.Repeat("ą", 3000)
+	got := truncate(long)
+	assert.LessOrEqual(t, len(got), maxMessageLen)
+	assert.True(t, utf8.ValidString(got), "must not split a utf-8 character")
+
+	// cuts exactly at the boundary, not mid-rune
+	assert.Equal(t, strings.Repeat("ą", 0)+got, got)
+	assert.False(t, strings.HasSuffix(got, "\ufffd"))
+}
+
+// Three attempts total, first run included - and rows written under the old
+// five-attempt policy must still be recognised as exhausted.
+func TestRetryBudget(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+
+	row, err := tb.Store.Enqueue(ctx, store.EnqueueParams{
+		Meta: `{"OriginUrl":"https://www.youtube.com/watch?v=a"}`, JobType: BackupJob,
+	})
+	require.NoError(t, err)
+	entry := store.Queue{ID: row.ID}
+
+	for want := int64(1); want <= jobAttempts; want++ {
+		got := jobResultForTest(entry, errors.New("boom"))
+		entry.FailCount = got.FailCount
+		assert.Equal(t, want, entry.FailCount, "failure %d", want)
+		require.NoError(t, tb.Store.UpdateQueueEntry(ctx, store.UpdateQueueEntryParams{
+			ID: entry.ID, Status: got.Status, FailCount: got.FailCount,
+		}))
+
+		next, err := tb.Store.NextInQueue(ctx)
+		if want < jobAttempts {
+			require.NoError(t, err, "still retryable after %d failures", want)
+			assert.Equal(t, entry.ID, next.ID)
+			continue
+		}
+		// the third attempt exhausts the budget
+		assert.ErrorIs(t, err, sql.ErrNoRows, "fail_count == 3 must not be selected again")
+	}
+
+	t.Run("legacy counts above the new limit stay exhausted", func(t *testing.T) {
+		other := newTestBot(t)
+		for _, n := range []int64{3, 4, 5} {
+			markQueue(t, other, canonicalVideoURL(fmt.Sprintf("v%d", n)), "failing", n)
+		}
+		markQueue(t, other, canonicalVideoURL("done"), "done", 5)
+		markQueue(t, other, canonicalVideoURL("gone"), "unavailable", 0)
+
+		failed, err := other.Store.FindFailedTasksInQueue(ctx)
+		require.NoError(t, err)
+		require.Len(t, failed, 3, "fail_count 3, 4 and 5 must all be reported")
+		got := map[int64]bool{}
+		for _, f := range failed {
+			got[f.FailCount] = true
+		}
+		assert.True(t, got[3] && got[4] && got[5])
+	})
+
+	t.Run("a fresh job can be created after an exhausted one", func(t *testing.T) {
+		before := tb.queueLen(t)
+		state, err := tb.scheduleBackup(ctx, testGID, videoBackupDir, canonicalVideoURL("a"))
+		require.NoError(t, err)
+		assert.Equal(t, backupScheduled, state)
+		assert.Equal(t, before+1, tb.queueLen(t))
+
+		// the exhausted row is left exactly as it was, untouched
+		var (
+			status    string
+			failCount int64
+		)
+		require.NoError(t, rawStore(t, tb).QueryRowContext(ctx,
+			`SELECT status, fail_count FROM queue WHERE id = ?`, entry.ID).Scan(&status, &failCount))
+		assert.Equal(t, "failing", status)
+		assert.Equal(t, int64(jobAttempts), failCount)
+	})
+}
+
+func jobResultForTest(entry store.Queue, err error) store.UpdateQueueEntryParams {
+	return jobrunner.JobResultForTest(entry, err)
 }

@@ -75,7 +75,9 @@ func parseYTLink(raw string) (ytLink, bool) {
 		link.Playlist = false
 		return link, true
 	}
-	if link.PlaylistID != "" {
+	// only the real playlist route counts. A random youtube path that happens to carry
+	// list= (e.g. /watch?list=..., /results?search=x&list=...) is not a playlist request.
+	if link.PlaylistID != "" && strings.TrimSuffix(u.Path, "/") == "/playlist" {
 		link.Playlist = true
 		return link, true
 	}

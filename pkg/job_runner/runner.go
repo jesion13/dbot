@@ -27,6 +27,11 @@ func NewRunner(ctx context.Context, store *store.Queries) Runner {
 
 type Job func(meta string) error
 
+// ErrPermanent marks a failure that will not fix itself on retry (e.g. a youtube
+// video that no longer exists). Such jobs are parked under status "unavailable"
+// instead of consuming retries.
+var ErrPermanent = errors.New("permanent job failure")
+
 func (r Runner) RegisterJob(key string, j Job) {
 	r.jobs.Store(key, j)
 }
@@ -40,6 +45,29 @@ func must[T any](v T, a bool) T {
 
 func (r Runner) getJob(key string) Job {
 	return must(r.jobs.Load(key)).(Job)
+}
+
+// jobResult maps a job outcome onto the queue row update.
+func jobResult(entry store.Queue, err error) store.UpdateQueueEntryParams {
+	updated := store.UpdateQueueEntryParams{
+		FailCount: entry.FailCount,
+		Status:    "done",
+		ID:        entry.ID,
+	}
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrPermanent):
+		slog.Info("job failed permanently", slog.Any("error", err))
+		// parked, not retried: nothing about it will change
+		updated.Status = "unavailable"
+		updated.LastMsg = sql.NullString{String: err.Error(), Valid: true}
+	default:
+		slog.Error("failed running job", slog.Any("error", err))
+		updated.FailCount = entry.FailCount + 1
+		updated.Status = "failing"
+		updated.LastMsg = sql.NullString{String: err.Error(), Valid: true}
+	}
+	return updated
 }
 
 //	type Queue struct {
@@ -67,26 +95,7 @@ func (r Runner) Loop() {
 
 		job = r.getJob(entry.JobType)
 		slog.Debug("running job", slog.String("key", entry.JobType), slog.String("meta", entry.Meta))
-		err = job(entry.Meta)
-		if err != nil {
-			slog.Error("failed running job", slog.Any("error", err))
-			updated = store.UpdateQueueEntryParams{
-				FailCount: entry.FailCount + 1,
-				LastMsg: sql.NullString{
-					String: err.Error(),
-					Valid:  true,
-				},
-				Status: "failing",
-				ID:     entry.ID,
-			}
-		} else {
-			updated = store.UpdateQueueEntryParams{
-				FailCount: entry.FailCount,
-				LastMsg:   sql.NullString{String: "", Valid: false},
-				Status:    "done",
-				ID:        entry.ID,
-			}
-		}
+		updated = jobResult(entry, job(entry.Meta))
 		err = r.store.UpdateQueueEntry(r.ctx, updated)
 		if err != nil {
 			slog.Error("failed updating queue entry", slog.Any("error", err))
@@ -99,4 +108,10 @@ func (r Runner) Loop() {
 		default:
 		}
 	}
+}
+
+// JobResultForTest exposes jobResult so other packages can assert the retry policy
+// against the SQL filters in db/queries/queue.sql.
+func JobResultForTest(entry store.Queue, err error) store.UpdateQueueEntryParams {
+	return jobResult(entry, err)
 }

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"dbot/pkg/ffmpeg"
 	"dbot/pkg/store"
@@ -50,6 +51,48 @@ func parseTime(s string) (time.Duration, error) {
 	return d, nil
 }
 
+// ErrInteractionAnswered means the interaction was already acknowledged, so the
+// generic error path in listeners.go must not send a second initial response. It is
+// returned even when delivering the final message failed: the interaction is consumed
+// either way and a second initial response would be rejected by discord.
+var ErrInteractionAnswered = errors.New("interaction already answered")
+
+const maxMessageLen = 2000
+
+// truncate shortens s to discord's limit without splitting a utf-8 rune.
+func truncate(s string) string {
+	if len(s) <= maxMessageLen {
+		return s
+	}
+	s = s[:maxMessageLen-1]
+	// back off to a rune boundary
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// answerDeferred replaces the deferred "thinking" response with the final message.
+// The original /play and /playlist replies were public, so the deferral is public too.
+func (d *DBot) answerDeferred(e *events.ApplicationCommandInteractionCreate, content string) error {
+	content = truncate(content)
+	if _, err := d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{
+		Content: &content,
+	}); err != nil {
+		// the interaction stays consumed - do not let the caller fall back to an initial
+		// response, discord would reject it
+		slog.Error("failed editing deferred response", slog.Any("error", err))
+	}
+	return ErrInteractionAnswered
+}
+
+// isPlaylistRequest reports whether a /play url addresses a whole playlist. Playlist
+// playback always does queue/cache/voice work, so those interactions are deferred.
+func isPlaylistRequest(url string) bool {
+	link, ok := parseYTLink(url)
+	return ok && link.Playlist
+}
+
 func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
 	data := e.SlashCommandInteractionData()
 	url := data.String("link")
@@ -61,7 +104,21 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 		url = att.URL
 	}
 
+	// defer before any playlist lookup, yt-dlp call or voice connect
+	deferred := isPlaylistRequest(url)
+	if deferred {
+		if err := e.DeferCreateMessage(false); err != nil {
+			return err
+		}
+	}
+
 	err := d.play(ctx, e.GuildID().String(), e.User().ID.String(), url)
+	if deferred {
+		if err != nil {
+			return d.answerDeferred(e, err.Error())
+		}
+		return d.answerDeferred(e, fmt.Sprintf("added %s", url))
+	}
 	if err != nil {
 		return err
 	}
@@ -72,53 +129,76 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 }
 
 func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	// every /playlist run does cache lookups, a voice connect and a queue walk, so it
+	// is always deferred, with or without update:true
+	if err := e.DeferCreateMessage(false); err != nil {
+		return err
+	}
+	answer := func(res queueResult, err error) error {
+		if err != nil {
+			return d.answerDeferred(e, err.Error())
+		}
+		return d.answerDeferred(e, playlistQueuedMsg(res))
+	}
+
 	data := e.SlashCommandInteractionData()
 	rawID := data.String("name")
 	update := data.Bool("update")
 
 	id, err := strconv.ParseInt(rawID, 10, 64)
 	if err != nil {
-		return fmt.Errorf("unknown playlist '%s'", rawID)
+		return d.answerDeferred(e, fmt.Sprintf("unknown playlist '%s'", rawID))
 	}
 
 	gID := e.GuildID().String()
 	pl, err := d.Store.GetPlaylist(ctx, store.GetPlaylistParams{ID: id, GuildID: gID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrPlaylistNotFound
+			return d.answerDeferred(e, ErrPlaylistNotFound.Error())
 		}
-		return fmt.Errorf("lookup playlist: %w", err)
+		return d.answerDeferred(e, fmt.Sprintf("lookup playlist: %v", err))
 	}
 
 	if update {
 		pl, err = d.syncPlaylist(ctx, pl)
 		if err != nil {
 			// no stale-snapshot fallback: the user asked for a sync that failed
-			return err
+			return d.answerDeferred(e, err.Error())
 		}
 	}
 
 	err = d.connectVoice(snowflake.MustParse(gID), snowflake.MustParse(e.User().ID.String()))
 	if err != nil {
-		return err
+		return answer(queueResult{}, err)
 	}
 
-	queued, pending, unavailable, err := d.queueSnapshot(ctx, gID, pl.ID)
+	res, err := d.queueSnapshot(ctx, gID, pl.ID)
 	if err != nil {
-		return err
+		return answer(queueResult{}, err)
 	}
-	if queued == 0 {
-		return ErrNoPlayableEntries
+	if res.queued == 0 {
+		return d.answerDeferred(e, ErrNoPlayableEntries.Error())
 	}
+	return answer(res, nil)
+}
 
-	msg := fmt.Sprintf("queued %d entries from '%s'", queued, pl.Title)
-	if pending > 0 {
-		msg += fmt.Sprintf(", %d not cached yet", pending)
+// playlistQueuedMsg reports queue and cache separately: "queued N" alone hides whether
+// the media is local, still downloading, or could not be cached at all.
+func playlistQueuedMsg(res queueResult) string {
+	msg := fmt.Sprintf("queued %d entries", res.queued)
+	if res.cached > 0 {
+		msg += fmt.Sprintf(", %d from cache", res.cached)
 	}
-	if unavailable > 0 {
-		msg += fmt.Sprintf(", %d unavailable", unavailable)
+	if res.waiting > 0 {
+		msg += fmt.Sprintf(", %d waiting for cache", res.waiting)
 	}
-	return e.CreateMessage(discord.MessageCreate{Content: msg})
+	if res.unscheduled > 0 {
+		msg += fmt.Sprintf(", %d could not be cached", res.unscheduled)
+	}
+	if res.unavailable > 0 {
+		msg += fmt.Sprintf(", %d unavailable", res.unavailable)
+	}
+	return msg
 }
 
 func (d *DBot) handleWypierdalaj(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {

@@ -38,8 +38,14 @@ type snapshotEntry struct {
 // buildSnapshot validates playlist metadata and turns it into ordered entries.
 //
 // An entry with a nil Duration is kept: that usually means the video is unavailable,
-// not that it left the playlist. Entries without any usable id or url are dropped -
-// there is nothing to look up or play for them.
+// not that it left the playlist. An entry we cannot resolve to a video id/url at all
+// makes the whole result unusable - dropping it would silently delete a member from
+// the previous snapshot.
+//
+// KNOWN LIMITATION: `yt-dlp --flat-playlist` exits 0 and gives no entry count we can
+// cross-check, so "this entry is missing from the response" and "this entry was removed
+// from the playlist" are indistinguishable. Completeness here means "yt-dlp succeeded
+// and every entry it returned was resolvable", nothing stronger.
 func buildSnapshot(meta ytdlp.PlaylistMeta) (title string, url string, entries []snapshotEntry, err error) {
 	if meta.ID == "" || strings.TrimSpace(meta.Title) == "" {
 		return "", "", nil, ErrPlaylistIncomplete
@@ -49,24 +55,18 @@ func buildSnapshot(meta ytdlp.PlaylistMeta) (title string, url string, entries [
 	for i := range meta.Entries {
 		e := meta.Entries[i]
 		id := strings.TrimSpace(e.ID)
-		entryURL := strings.TrimSpace(e.URL)
-		if id != "" {
-			entryURL = canonicalVideoURL(id)
-		} else if link, ok := parseYTLink(entryURL); !ok || link.VideoID == "" {
-			slog.Debug("dropping playlist entry without id or url",
-				slog.String("title", e.Title), slog.String("url", e.URL), slog.Int("position", i))
-			continue
-		} else {
-			id = link.VideoID
-			entryURL = canonicalVideoURL(id)
+		if id == "" {
+			if link, ok := parseYTLink(strings.TrimSpace(e.URL)); ok && link.VideoID != "" {
+				id = link.VideoID
+			}
 		}
-		if entryURL == "" {
-			continue
+		if id == "" {
+			return "", "", nil, fmt.Errorf("%w: entry %d ('%s') has no video id or url", ErrPlaylistIncomplete, i, e.Title)
 		}
 
 		entries = append(entries, snapshotEntry{
 			VideoID: id,
-			URL:     entryURL,
+			URL:     canonicalVideoURL(id),
 			// an unavailable video has no title; keep the membership anyway
 			Title:    orUnknown(e.Title, id),
 			Position: len(entries),
@@ -166,20 +166,36 @@ func (d *DBot) syncPlaylist(ctx context.Context, pl store.Playlist) (store.Playl
 	return updated, nil
 }
 
+// queueResult is what happened to one snapshot.
+type queueResult struct {
+	queued      int // appended to the playback queue
+	cached      int // played from local media
+	waiting     int // no local media, a backup/repair job covers it
+	unscheduled int // no local media and we could not schedule a job
+	unavailable int // nothing playable right now
+}
+
+func (r queueResult) total() int {
+	return r.cached + r.waiting + r.unscheduled + r.unavailable
+}
+
 // planQueue resolves every snapshot entry to something playable, in snapshot order.
-// It returns the links to append plus how many are still being cached and how many
-// are unavailable. It never returns a filesystem path that does not exist.
-func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.PlaylistEntry) (links []string, pending, unavailable int, err error) {
+// It returns the links to append plus what the cache is doing about each entry.
+func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.PlaylistEntry) (links []string, res queueResult, err error) {
 	for _, e := range entries {
 		videoID := e.YoutubeVideoID.String
 		url := e.YoutubeUrl
 
+		// a local copy wins over any job history: the file is playable regardless of
+		// what a past attempt concluded
 		path, found, err := d.cachedVideo(ctx, videoID, url)
 		if err != nil {
-			return nil, pending, unavailable, fmt.Errorf("lookup '%s': %w", url, err)
+			return nil, res, fmt.Errorf("lookup '%s': %w", url, err)
 		}
 		if found {
 			links = append(links, path)
+			res.queued++
+			res.cached++
 			continue
 		}
 
@@ -188,36 +204,43 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 		}
 		if url == "" {
 			// still a snapshot member, just not playable right now
-			unavailable++
+			res.unavailable++
 			continue
 		}
 
-		// no usable backup (or a broken one): play the source now and repair/cache it
-		// in the background. The job re-checks the cache before downloading.
-		queued, err := d.enqueueBackup(ctx, gid, videoBackupDir, url)
-		switch {
-		case err != nil:
-			slog.Error("failed scheduling backup", slog.Any("error", err), slog.String("url", url))
-		case queued:
-			pending++
+		state, err := d.scheduleBackup(ctx, gid, videoBackupDir, url)
+		switch state {
+		case backupUnavailable:
+			// still a member of the snapshot, but youtube will not serve it and there is
+			// no local copy - queueing the url would only fail at playback time
+			res.unavailable++
+			continue
+		case backupError:
+			// still play from source, but say so honestly
+			slog.Error("backup scheduling failed", slog.Any("error", err), slog.String("url", url))
+			res.unscheduled++
+		case backupPending, backupScheduled:
+			res.waiting++
 		}
+
 		links = append(links, url)
+		res.queued++
 	}
-	return links, pending, unavailable, nil
+	return links, res, nil
 }
 
 // queueSnapshot appends a whole saved snapshot to the existing queue, in stored order.
-func (d *DBot) queueSnapshot(ctx context.Context, gid string, playlistID int64) (queued, pending, unavailable int, err error) {
+func (d *DBot) queueSnapshot(ctx context.Context, gid string, playlistID int64) (queueResult, error) {
 	entries, err := d.Store.ListPlaylistEntries(ctx, playlistID)
 	if err != nil {
-		return 0, 0, 0, fmt.Errorf("list entries: %w", err)
+		return queueResult{}, fmt.Errorf("list entries: %w", err)
 	}
-	links, pending, unavailable, err := d.planQueue(ctx, gid, entries)
+	links, res, err := d.planQueue(ctx, gid, entries)
 	if err != nil {
-		return 0, pending, unavailable, err
+		return res, err
 	}
 	for _, l := range links {
 		d.MusicPlayer.Add(l)
 	}
-	return len(links), pending, unavailable, nil
+	return res, nil
 }

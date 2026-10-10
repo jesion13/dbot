@@ -349,7 +349,7 @@ func (d *DBot) playPlaylistURL(ctx context.Context, gID, playlistID string) erro
 		YoutubePlaylistID: playlistID,
 	})
 	if err == nil {
-		_, _, _, err = d.queueSnapshot(ctx, gID, pl.ID)
+		_, err = d.queueSnapshot(ctx, gID, pl.ID)
 		return err
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -369,7 +369,7 @@ func (d *DBot) playPlaylistURL(ctx context.Context, gID, playlistID string) erro
 		return err
 	}
 
-	_, _, _, err = d.queueSnapshot(ctx, gID, pl.ID)
+	_, err = d.queueSnapshot(ctx, gID, pl.ID)
 	return err
 }
 
