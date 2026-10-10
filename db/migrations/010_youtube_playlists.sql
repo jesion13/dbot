@@ -4,9 +4,6 @@
 -- Legacy rows are deliberately discarded rather than mapped onto invented ids:
 -- the old schema had no youtube playlist id, only a user supplied name plus a
 -- playlist URL that may or may not carry a list= parameter.
---
--- NOTE: no goose down section - sqlc replays down statements as if they were up,
--- which would resurrect the old schema for every future generation.
 DROP TABLE IF EXISTS playlist_entries;
 DROP TABLE IF EXISTS playlists;
 

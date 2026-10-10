@@ -37,8 +37,8 @@ go vet ./...
 go fmt ./...
 go tool goose ...                  # migration tool, works via go.mod `tool` directive
 sqlc generate                      # works with sqlc v1.27.0 on this toolchain.
-                                    # Careful: goose `-- +goose down` sections are replayed as if they
-                                    # were up, so a migration that recreates a table must not have one
+                                    # Migrations are up-only by convention - a `-- +goose down` section
+                                    # gets replayed as if it were up and corrupts the generated schema
 ```
 
 ## Architecture
