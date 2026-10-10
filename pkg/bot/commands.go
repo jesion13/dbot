@@ -25,6 +25,23 @@ var cmds = []discord.ApplicationCommandCreate{
 		},
 	},
 	discord.SlashCommandCreate{
+		Name:        "playlist",
+		Description: "queue a saved playlist, optionally resyncing it from YouTube",
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
+				Name:         "name",
+				Description:  "playlist",
+				Required:     true,
+				Autocomplete: true,
+			},
+			discord.ApplicationCommandOptionBool{
+				Name:        "update",
+				Description: "sync the saved snapshot with YouTube before queueing",
+				Required:    false,
+			},
+		},
+	},
+	discord.SlashCommandCreate{
 		Name:        "pause-play",
 		Description: "play pause",
 	},
@@ -128,6 +145,7 @@ type cmdHandler = func(context.Context, *events.ApplicationCommandInteractionCre
 func (d *DBot) CommandHandlers() map[string]cmdHandler {
 	return map[string]cmdHandler{
 		"play":            d.handlePlay,
+		"playlist":        d.handlePlaylist,
 		"wypierdalaj":     d.handleWypierdalaj,
 		"set-bot-channel": d.handleMapChannel,
 		"pause-play":      d.handlePause,

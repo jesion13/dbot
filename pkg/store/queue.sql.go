@@ -10,6 +10,17 @@ import (
 	"database/sql"
 )
 
+const countQueueByJobType = `-- name: CountQueueByJobType :one
+SELECT count(*) FROM queue WHERE job_type = ?1
+`
+
+func (q *Queries) CountQueueByJobType(ctx context.Context, jobType string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countQueueByJobType, jobType)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const enqueue = `-- name: Enqueue :one
 INSERT INTO queue (meta,fail_count,last_msg,status,job_type)
 VALUES (

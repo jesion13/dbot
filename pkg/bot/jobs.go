@@ -23,6 +23,17 @@ func (d *DBot) backupVideoJob(meta string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// re-check the cache here: the caller's preflight lookup can be minutes old and
+	// another job for the same video may have finished in the meantime.
+	path, found, err := d.cachedVideo(ctx, "", bf.OriginUrl)
+	if err != nil {
+		return fmt.Errorf("backupFile: %w", err)
+	}
+	if found {
+		slog.Debug("backup skipped, already cached", slog.String("url", bf.OriginUrl), slog.String("path", path))
+		return nil
+	}
+
 	dir := filepath.Join(config.TMP_PATH, "backup")
 	os.MkdirAll(dir, 0o755)
 	ctx = context.WithValue(ctx, config.DirKey, dir)

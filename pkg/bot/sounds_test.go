@@ -19,7 +19,7 @@ const testGID = "492318912881491981"
 
 // openTestStore runs real migrations into a fresh temp DB and seeds the
 // handful of sounds/aliases the matching tests below expect.
-func openTestStore(t *testing.T) *store.Queries {
+func openTestStore(t *testing.T) *db.Store {
 	t.Helper()
 	config.DB_DIR = t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -65,7 +65,7 @@ func TestFindSound(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sounds, err := findSound(db, tt.input, testGID)
+			sounds, err := findSound(db.Queries, tt.input, testGID)
 			require.NoError(t, err)
 			require.Len(t, sounds, 1)
 			require.Contains(t, sounds[0].Aliases, tt.wantAlias)
@@ -73,12 +73,12 @@ func TestFindSound(t *testing.T) {
 	}
 
 	t.Run("no match", func(t *testing.T) {
-		_, err := findSound(db, "asdfghjkl", testGID)
+		_, err := findSound(db.Queries, "asdfghjkl", testGID)
 		require.True(t, errors.Is(err, ErrSoundNotFound))
 	})
 
 	t.Run("short input below prefix minimum", func(t *testing.T) {
-		_, err := findSound(db, "ho", testGID)
+		_, err := findSound(db.Queries, "ho", testGID)
 		require.True(t, errors.Is(err, ErrSoundNotFound))
 	})
 }

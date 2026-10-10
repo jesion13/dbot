@@ -137,6 +137,13 @@ func (p *Player) PlaySound(link string) {
 func (p *Player) musicLoop() {
 	for a := range p.list.nextAudio {
 		slog.Debug("list.nextAudio", slog.Any("a", a))
+		if p.VC == nil {
+			// nothing is connected - Add is only ever called after connectVoice, so
+			// this is unreachable in the running bot. Drop the track rather than
+			// dereferencing a nil conn.
+			slog.Debug("musicLoop: no voice connection, dropping track", slog.Any("a", a))
+			continue
+		}
 		if len(a.Filepath) == 0 && strings.Contains(a.Link, p.VC.GuildID().String()) {
 			a.Filepath = filepath.Join(config.BACKUP_DIR, a.Link)
 		}

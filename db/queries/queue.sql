@@ -22,3 +22,6 @@ WHERE status != 'done' and fail_count < 5 order by id asc;
 -- name: FindFailedTasksInQueue :many
 SELECT * FROM queue
 WHERE status != 'done' and fail_count = 5 order by id asc;
+
+-- name: CountQueueByJobType :one
+SELECT count(*) FROM queue WHERE job_type = :job_type;

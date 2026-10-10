@@ -160,7 +160,7 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 		}
 	}
 
-	err = d.Backup.InsertArtefact(ctx, backup.InsertArtefactParams{
+	artParams := backup.InsertArtefactParams{
 		Path:      info.Name,
 		MediaType: params.ContentType,
 		OriginUrl: params.OriginUrl,
@@ -169,11 +169,30 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 		Gid:       params.GID,
 		Chid:      params.CHID,
 		Msgid:     params.MSGID,
-	})
-	if err != nil {
-		return info, fmt.Errorf("insert artefact: %w", err)
+	}
+	err = d.Backup.InsertArtefact(ctx, artParams)
+	if err == nil {
+		return info, nil
 	}
 
+	// a duplicate job (or a concurrent backup of the same url) hits the origin_url
+	// primary key; point the existing record at the new file instead of leaving the
+	// broken one behind.
+	if !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		return info, fmt.Errorf("insert artefact: %w", err)
+	}
+	err = d.Backup.RepairArtefact(ctx, backup.RepairArtefactParams{
+		Path:      artParams.Path,
+		MediaType: artParams.MediaType,
+		OriginUrl: artParams.OriginUrl,
+		Hash:      artParams.Hash,
+		Gid:       artParams.Gid,
+		Chid:      artParams.Chid,
+		Msgid:     artParams.Msgid,
+	})
+	if err != nil {
+		return info, fmt.Errorf("repair artefact '%s': %w", params.OriginUrl, err)
+	}
 	return info, nil
 }
 
@@ -278,7 +297,13 @@ func (d *DBot) backupFile(params BackupFileParams) (BackupFile, error) {
 	}
 
 	slog.Debug("backupFile", slog.String("name", pf), slog.Int64("size", n))
-	backupFile.Name = strings.TrimLeft(f.Name(), config.BACKUP_DIR)
+	// stored paths are relative to config.BACKUP_DIR; TrimLeft would strip a char set
+	// instead of the prefix and leave an unusable path.
+	rel, err := filepath.Rel(config.BACKUP_DIR, pf)
+	if err != nil {
+		return backupFile, fmt.Errorf("rel path for '%s': %w", pf, err)
+	}
+	backupFile.Name = rel
 	backupFile.Size = n
 
 	return backupFile, nil

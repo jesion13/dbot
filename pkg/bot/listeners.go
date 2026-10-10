@@ -31,6 +31,7 @@ func (d *DBot) RegisterEventListiners() {
 		bot.NewListenerFunc(d.messagesEditListener),
 		bot.NewListenerFunc(d.onUserVoiceStateChange),
 		bot.NewListenerFunc(d.messageDeleteListener),
+		bot.NewListenerFunc(d.playlistAutocomplete),
 	)
 }
 

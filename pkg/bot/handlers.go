@@ -2,6 +2,7 @@ package dbot
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/rest"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 func parseTime(s string) (time.Duration, error) {
@@ -59,7 +61,7 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 		url = att.URL
 	}
 
-	err := d.play(e.GuildID().String(), e.User().ID.String(), url)
+	err := d.play(ctx, e.GuildID().String(), e.User().ID.String(), url)
 	if err != nil {
 		return err
 	}
@@ -67,6 +69,56 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 	return e.CreateMessage(discord.MessageCreate{
 		Content: fmt.Sprintf("added %s", url),
 	})
+}
+
+func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	data := e.SlashCommandInteractionData()
+	rawID := data.String("name")
+	update := data.Bool("update")
+
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("unknown playlist '%s'", rawID)
+	}
+
+	gID := e.GuildID().String()
+	pl, err := d.Store.GetPlaylist(ctx, store.GetPlaylistParams{ID: id, GuildID: gID})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrPlaylistNotFound
+		}
+		return fmt.Errorf("lookup playlist: %w", err)
+	}
+
+	if update {
+		pl, err = d.syncPlaylist(ctx, pl)
+		if err != nil {
+			// no stale-snapshot fallback: the user asked for a sync that failed
+			return err
+		}
+	}
+
+	err = d.connectVoice(snowflake.MustParse(gID), snowflake.MustParse(e.User().ID.String()))
+	if err != nil {
+		return err
+	}
+
+	queued, pending, unavailable, err := d.queueSnapshot(ctx, gID, pl.ID)
+	if err != nil {
+		return err
+	}
+	if queued == 0 {
+		return ErrNoPlayableEntries
+	}
+
+	msg := fmt.Sprintf("queued %d entries from '%s'", queued, pl.Title)
+	if pending > 0 {
+		msg += fmt.Sprintf(", %d still downloading in background", pending)
+	}
+	if unavailable > 0 {
+		msg += fmt.Sprintf(", %d unavailable", unavailable)
+	}
+	return e.CreateMessage(discord.MessageCreate{Content: msg})
 }
 
 func (d *DBot) handleWypierdalaj(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
@@ -191,7 +243,7 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 	}
 
 	// if download succeded backup file
-	go saveVideoInDir(d, url, e.GuildID().String(), "tomp4")
+	go d.saveVideoInDir(url, e.GuildID().String(), "tomp4")
 
 	f, err := os.Open(info.Filepath)
 	if err != nil {
