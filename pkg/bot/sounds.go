@@ -58,12 +58,39 @@ func (srq *soundsRandQ) rand(db *store.Queries, gid string) store.Sound {
 	return v
 }
 
+func (srq *soundsRandQ) all(db *store.Queries, gid string) []store.Sound {
+	srq.refresh(db, gid)
+	srq.Lock()
+	defer srq.Unlock()
+	return append([]store.Sound(nil), srq.s[gid]...)
+}
+
 var srq = soundsRandQ{
 	s: map[string][]store.Sound{},
 }
 
+const (
+	minPrefixLen   = 3
+	minContainsLen = 4
+	fuzzyThreshold = 75
+)
+
+// matchScore ranks alias against name: exact > prefix > contains > fuzzy typo tolerance.
+// Longer aliases win ties within prefix/contains so "cymbal" beats a shorter false prefix.
+func matchScore(alias, name string) int {
+	if alias == name {
+		return 1000
+	}
+	if len(name) >= minPrefixLen && strings.HasPrefix(alias, name) {
+		return 200 + len(alias)
+	}
+	if len(name) >= minContainsLen && strings.Contains(alias, name) {
+		return 150 + len(alias)
+	}
+	return fuzzy.Ratio(alias, name)
+}
+
 func findSound(db *store.Queries, name string, gid string) ([]store.Sound, error) {
-	srq.refresh(db, gid)
 	var ss []store.Sound
 	name = strings.ToLower(strings.ReplaceAll(name, " ", ""))
 	if strings.HasPrefix(name, "sound") || strings.HasPrefix(name, "event") {
@@ -84,26 +111,21 @@ func findSound(db *store.Queries, name string, gid string) ([]store.Sound, error
 		return ss, nil
 	}
 
-	sounds, err := db.SelectSounds(context.Background(), gid)
-	if err != nil {
-		slog.Error("db select failed", slog.Any("error", err))
-	}
+	sounds := srq.all(db, gid)
 	var fullSound store.Sound
-	var fullRatio int
+	var fullScore int
 	for _, sound := range sounds {
 		for _, alias := range sound.Aliases {
-			ratio := fuzzy.WRatio(alias, name)
-			lev := fuzzy.EditDistance(alias,name)
-			ratio += lev
-			if ratio > 80 && ratio > fullRatio {
-				slog.Debug("ratio fuzzy match", slog.Int("ratio", ratio), slog.String("alias", alias))
-				fullRatio = ratio
+			score := matchScore(alias, name)
+			if score > fullScore {
+				slog.Debug("sound match", slog.Int("score", score), slog.String("alias", alias))
+				fullScore = score
 				fullSound = sound
 			}
 		}
 	}
 
-	if fullRatio >= 80 {
+	if fullScore >= fuzzyThreshold {
 		return append(ss, fullSound), nil
 	}
 
