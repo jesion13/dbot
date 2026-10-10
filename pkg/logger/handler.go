@@ -47,14 +47,17 @@ const (
 	colorWhite   = "\x1b[37;1m"
 )
 
+// maxLineWidth is the limit (excluding ANSI color codes) under which a log
+// record is rendered on a single line instead of one line per attr.
+const maxLineWidth = 120
+
 func (h *Handler) Handle(_ context.Context, r slog.Record) error {
-	var b strings.Builder
-	level := fmt.Sprintf("%-5s", levelString(r.Level))
-	fmt.Fprintf(&b, "%s %s%s%s %s%s%s %s",
-		r.Time.Format(timeFormat),
-		levelColor(r.Level), level, colorReset,
-		colorGrey, caller(r.PC), colorReset,
-		r.Message)
+	timeStr := r.Time.Format(timeFormat)
+	levelStr := fmt.Sprintf("%-5s", levelString(r.Level))
+	callerStr := caller(r.PC)
+
+	var plain strings.Builder
+	fmt.Fprintf(&plain, "%s %s %s %s", timeStr, levelStr, callerStr, r.Message)
 
 	lines := make([]string, 0, r.NumAttrs())
 	r.Attrs(func(a slog.Attr) bool {
@@ -62,11 +65,31 @@ func (h *Handler) Handle(_ context.Context, r slog.Record) error {
 		return true
 	})
 
-	b.WriteByte('\n')
+	width := plain.Len()
 	for _, line := range lines {
-		b.WriteString("   ")
-		b.WriteString(line)
+		width += 1 + len(line)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s%s%s %s%s%s %s",
+		timeStr,
+		levelColor(r.Level), levelStr, colorReset,
+		colorGrey, callerStr, colorReset,
+		r.Message)
+
+	if width <= maxLineWidth {
+		for _, line := range lines {
+			b.WriteByte(' ')
+			b.WriteString(line)
+		}
 		b.WriteByte('\n')
+	} else {
+		b.WriteByte('\n')
+		for _, line := range lines {
+			b.WriteString("    ")
+			b.WriteString(line)
+			b.WriteByte('\n')
+		}
 	}
 
 	_, err := io.WriteString(h.out, b.String())
