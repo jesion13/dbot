@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"os/signal"
 	"time"
@@ -37,7 +36,7 @@ func main() {
 }
 
 func bot(ctx context.Context, db *store.Queries) {
-	client, err := disgo.New(fmt.Sprintf("Bot %s", config.TOKEN),
+	client, err := disgo.New(config.TOKEN,
 		disgobot.WithGatewayConfigOpts(
 			gateway.WithIntents(gateway.IntentsNonPrivileged, gateway.IntentMessageContent),
 		),
