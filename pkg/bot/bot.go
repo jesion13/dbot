@@ -331,6 +331,7 @@ func (d *DBot) play(ctx context.Context, gID, uID string, url string) error {
 			slog.Debug("play: artefact already exists", slog.String("path", path))
 			url = path
 		} else {
+			slog.Debug("play: not cached, queueing source and scheduling backup", slog.String("url", url))
 			go d.saveVideoInDir(url, gID, videoBackupDir)
 		}
 

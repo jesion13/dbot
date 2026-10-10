@@ -114,6 +114,24 @@ func (q *Queries) NextInQueue(ctx context.Context) (Queue, error) {
 	return i, err
 }
 
+const queueHasJob = `-- name: QueueHasJob :one
+SELECT count(*) FROM queue WHERE job_type = ?1 AND meta = ?2
+`
+
+type QueueHasJobParams struct {
+	JobType string
+	Meta    string
+}
+
+// queue rows are never deleted, so an existing row means this exact job already ran:
+// either the artefact exists (cachedVideo would have found it) or it failed for good.
+func (q *Queries) QueueHasJob(ctx context.Context, arg QueueHasJobParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, queueHasJob, arg.JobType, arg.Meta)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const updateQueueEntry = `-- name: UpdateQueueEntry :exec
 UPDATE queue SET
 fail_count = ?1,

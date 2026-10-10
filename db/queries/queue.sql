@@ -25,3 +25,8 @@ WHERE status != 'done' and fail_count = 5 order by id asc;
 
 -- name: CountQueueByJobType :one
 SELECT count(*) FROM queue WHERE job_type = :job_type;
+
+-- queue rows are never deleted, so an existing row means this exact job already ran:
+-- either the artefact exists (cachedVideo would have found it) or it failed for good.
+-- name: QueueHasJob :one
+SELECT count(*) FROM queue WHERE job_type = :job_type AND meta = :meta;

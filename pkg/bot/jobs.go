@@ -7,11 +7,34 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"dbot/pkg/config"
 )
 
 const BackupJob = "backup"
+
+// isUnavailableVideo reports a yt-dlp failure that will not fix itself on retry.
+// shortcut: matching yt-dlp's stderr text; if upstream rewords it we just fall back to
+// retrying like before, which is noisy but not wrong.
+func isUnavailableVideo(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	for _, msg := range []string{
+		"Video unavailable",
+		"Private video",
+		"has been removed",            // TOS strike / removed by uploader
+		"no longer available",         // deleted channel
+		"Sign in to confirm your age", // age gated
+	} {
+		if strings.Contains(s, msg) {
+			return true
+		}
+	}
+	return false
+}
 
 func (d *DBot) backupVideoJob(meta string) error {
 	var bf BackupFileParams
@@ -40,6 +63,13 @@ func (d *DBot) backupVideoJob(meta string) error {
 
 	f, err := d.downloadAsMP4(ctx, bf.OriginUrl)
 	if err != nil {
+		if isUnavailableVideo(err) {
+			// still a playlist member, but youtube will not serve it. Retrying burns
+			// attempts and, worse, blocks every other job behind this one - the runner
+			// is a single loop over `id asc`.
+			slog.Info("backup skipped, video unavailable", slog.String("url", bf.OriginUrl))
+			return nil
+		}
 		return fmt.Errorf("backupFile: %w", err)
 	}
 	defer f.File.Close()

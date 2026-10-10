@@ -541,9 +541,51 @@ func TestPlanQueueSchedulesBackups(t *testing.T) {
 	tb.writeArtefactFile(t, canonicalVideoURL("a"), testGID+"/play_history/a.mp4")
 	links, pending, _, err := tb.planQueue(ctx, testGID, tb.entries(t, pl.ID))
 	require.NoError(t, err)
-	assert.Equal(t, 1, pending)
+	assert.Equal(t, 0, pending, "nothing new to download: a is cached, b was already queued")
 	assert.Equal(t, testGID+"/play_history/a.mp4", links[0])
-	assert.Equal(t, int64(3), tb.queueLen(t), "a cached video must not queue another job")
+	assert.Equal(t, int64(2), tb.queueLen(t), "neither a cached nor b may queue another job")
+}
+
+func TestPlanQueueSkipsAlreadyAttemptedVideos(t *testing.T) {
+	tb := newTestBot(t)
+	ctx := tb.Ctx
+
+	pl, err := tb.saveSnapshot(ctx, testGID, testPlaylistMeta(t, "PL1", "dupa", "a", "b"), false)
+	require.NoError(t, err)
+	entries := tb.entries(t, pl.ID)
+
+	_, pending, _, err := tb.planQueue(ctx, testGID, entries)
+	require.NoError(t, err)
+	assert.Equal(t, 2, pending)
+	require.Equal(t, int64(2), tb.queueLen(t))
+
+	// the queue keeps rows forever, so the second run must not re-queue anything:
+	// those videos are cached or permanently gone
+	_, pending, _, err = tb.planQueue(ctx, testGID, entries)
+	require.NoError(t, err)
+	assert.Equal(t, 0, pending, "already attempted videos must not be queued again")
+	assert.Equal(t, int64(2), tb.queueLen(t))
+}
+
+func TestIsUnavailableVideo(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"unavailable", errors.New("backupFile: 'u': yt-dlp: failed to download\nERROR: [youtube] x: Video unavailable\n"), true},
+		{"private", errors.New("ERROR: [youtube] x: Private video. Sign in"), true},
+		{"tos removal", errors.New("ERROR: [youtube] x: This video has been removed for violating YouTube's Terms of Service"), true},
+		{"deleted", errors.New("ERROR: [youtube] x: This video is no longer available because the account has been terminated"), true},
+		{"age gated", errors.New("ERROR: [youtube] x: Sign in to confirm your age"), true},
+		{"transient", errors.New("ERROR: unable to download webpage"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isUnavailableVideo(tt.err))
+		})
+	}
 }
 
 func TestBackupJobIsIdempotent(t *testing.T) {

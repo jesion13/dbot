@@ -113,7 +113,7 @@ func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandI
 
 	msg := fmt.Sprintf("queued %d entries from '%s'", queued, pl.Title)
 	if pending > 0 {
-		msg += fmt.Sprintf(", %d still downloading in background", pending)
+		msg += fmt.Sprintf(", %d not cached yet", pending)
 	}
 	if unavailable > 0 {
 		msg += fmt.Sprintf(", %d unavailable", unavailable)

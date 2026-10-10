@@ -194,9 +194,11 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 
 		// no usable backup (or a broken one): play the source now and repair/cache it
 		// in the background. The job re-checks the cache before downloading.
-		if err := d.enqueueBackup(ctx, gid, videoBackupDir, url); err != nil {
+		queued, err := d.enqueueBackup(ctx, gid, videoBackupDir, url)
+		switch {
+		case err != nil:
 			slog.Error("failed scheduling backup", slog.Any("error", err), slog.String("url", url))
-		} else {
+		case queued:
 			pending++
 		}
 		links = append(links, url)
