@@ -13,3 +13,9 @@ libdave:
 build:
 	go mod tidy
 	docker build -t dbot .
+
+compose:
+	DBOT_TAG=$(filter-out $@,$(MAKECMDGOALS)) docker compose up -d
+
+%:
+	@:
