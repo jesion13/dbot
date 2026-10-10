@@ -370,9 +370,9 @@ func (d *DBot) playFromYTPlaylist(url string,gID string) error {
 			continue
 		}
 		u := info.Entries[i].URL
-		art, err := d.Backup.GetArtefact(d.Ctx, url)
+		art, err := d.Backup.GetArtefact(d.Ctx, u)
 		if err != nil {
-			go saveVideoInDir(d, url, gID, "play_history")
+			go saveVideoInDir(d, u, gID, "play_history")
 		} else {
 			u = art.Path
 		}

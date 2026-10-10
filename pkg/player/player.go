@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"dbot/pkg/config"
 	"dbot/pkg/ytdlp"
@@ -19,6 +20,34 @@ import (
 	"github.com/fr-str/log"
 	"github.com/pion/opus/pkg/oggreader"
 )
+
+// framePacer paces opus frame sends to real-time (20ms/frame), matching
+// disgo's own voice.AudioSender timing. We can't use AudioSender/
+// SetOpusFrameProvider directly: it assumes exclusive ownership of the
+// Conn, but music and sounds are two independent producers that both write
+// to the same Conn (a sound can interrupt a song mid-stream) - handing
+// ownership to a second provider silently abandons the first one, which
+// is why using it caused the song to never resume after a sound played.
+type framePacer struct {
+	lastFrameSent int64
+}
+
+func (fp *framePacer) wait() {
+	if fp.lastFrameSent == 0 {
+		fp.lastFrameSent = time.Now().UnixMilli()
+		return
+	}
+
+	sleepTime := time.Duration(int64(voice.OpusFrameSizeMs) - (time.Now().UnixMilli() - fp.lastFrameSent))
+	if sleepTime > 0 {
+		time.Sleep(sleepTime * time.Millisecond)
+	}
+	if time.Now().UnixMilli() < fp.lastFrameSent+int64(voice.OpusFrameSizeMs)*3 {
+		fp.lastFrameSent += int64(voice.OpusFrameSizeMs)
+	} else {
+		fp.lastFrameSent = time.Now().UnixMilli()
+	}
+}
 
 func (p *Player) playerErr(msg string, vars ...any) Err {
 	return Err{
@@ -225,6 +254,7 @@ func (p *Player) playV2(audio *Audio) error {
 	ctx := context.Background()
 	p.VC.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
 	defer p.VC.SetSpeaking(ctx, voice.SpeakingFlagNone)
+	var pacer framePacer
 	for {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
@@ -236,6 +266,7 @@ func (p *Player) playV2(audio *Audio) error {
 
 		for _, frame := range page {
 			p.Lock()
+			pacer.wait()
 			_, err := p.VC.UDP().Write(frame)
 			p.Unlock()
 			if err != nil {
@@ -294,6 +325,7 @@ func (p *Player) playSound(audio *Audio) error {
 	ctx := context.Background()
 	p.VC.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
 	defer p.VC.SetSpeaking(ctx, voice.SpeakingFlagNone)
+	var pacer framePacer
 	for {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
@@ -304,6 +336,7 @@ func (p *Player) playSound(audio *Audio) error {
 		}
 
 		for _, frame := range page {
+			pacer.wait()
 			if _, err := p.VC.UDP().Write(frame); err != nil {
 				log.Error("failed to write opus frame", log.Err(err))
 			}
