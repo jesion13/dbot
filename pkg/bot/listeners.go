@@ -26,7 +26,6 @@ func (d *DBot) RegisterEventListiners() {
 	cmdHandlers := d.CommandHandlers()
 	d.Client.AddEventListeners(
 		bot.NewListenerFunc(d.commands(cmdHandlers)),
-		bot.NewListenerFunc(d.autocomplete),
 		bot.NewListenerFunc(d.Ready),
 		bot.NewListenerFunc(d.messagesListener),
 		bot.NewListenerFunc(d.messagesEditListener),
@@ -80,15 +79,6 @@ func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(e *events.Applic
 					slog.Error("response failed", slog.Any("error", err))
 				}
 			}
-		}
-	}
-}
-
-func (d *DBot) autocomplete(e *events.AutocompleteInteractionCreate) {
-	if e.Data.CommandName == "load-playlist" {
-		err := d.autocompleteForPlayPlaylist(e)
-		if err != nil {
-			slog.Error("autocomplete failed", slog.Any("error", err))
 		}
 	}
 }

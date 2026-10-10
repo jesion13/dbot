@@ -107,34 +107,6 @@ var cmds = []discord.ApplicationCommandCreate{
 			},
 		},
 	},
-	discord.SlashCommandCreate{
-		Name:        "save-playlist",
-		Description: "saves playlist and downloads all avaiable videos",
-		Options: []discord.ApplicationCommandOption{
-			discord.ApplicationCommandOptionString{
-				Name:        "name",
-				Description: "name",
-				Required:    true,
-			},
-			discord.ApplicationCommandOptionString{
-				Name:        "yt-link",
-				Description: "link",
-				Required:    true,
-			},
-		},
-	},
-	discord.SlashCommandCreate{
-		Name:        "load-playlist",
-		Description: "loads saved playlist",
-		Options: []discord.ApplicationCommandOption{
-			discord.ApplicationCommandOptionString{
-				Name:         "name",
-				Description:  "name",
-				Autocomplete: true,
-				Required:     true,
-			},
-		},
-	},
 }
 
 func (d *DBot) ClearCmds() {
@@ -161,7 +133,5 @@ func (d *DBot) CommandHandlers() map[string]cmdHandler {
 		"pause-play":      d.handlePause,
 		"sound":           d.handleSound,
 		"to-mp4":          d.handleToMP4,
-		"save-playlist":   d.savePlaylist,
-		"load-playlist":   d.playPlaylistFromDB,
 	}
 }

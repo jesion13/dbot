@@ -2,7 +2,6 @@ package dbot
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,7 +82,6 @@ func Start(ctx context.Context, client *bot.Client, dbstore *store.Queries) *DBo
 	}
 
 	runner := startJobRunner(ctx, dbstore)
-	runner.RegisterJob(DownloadJob, d.downloadAsync)
 	runner.RegisterJob(BackupJob, d.backupVideoJob)
 
 	// Listeners must be registered befor we open connection
@@ -377,87 +375,6 @@ func (d *DBot) playFromYTPlaylist(url string, gID string) error {
 			u = art.Path
 		}
 		d.MusicPlayer.Add(u)
-	}
-
-	return nil
-}
-
-func (d *DBot) savePlaylistFromYT(name, url, gID string) error {
-	info, err := d.PlaylistInfo(url)
-	if err != nil {
-		return fmt.Errorf("failed getting playlist info: %w", err)
-	}
-	if len(info.Entries) == 0 {
-		return fmt.Errorf("failed to get video list from playlist")
-	}
-
-	playlist, err := d.Store.CreatePlaylist(d.Ctx, store.CreatePlaylistParams{
-		GuildID: gID,
-		Name:    name,
-		YoutubeUrl: sql.NullString{
-			String: info.WebpageURL,
-			Valid:  true,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed creating playlist: %w", err)
-	}
-
-	for i := range info.Entries {
-		if info.Entries[i].Duration == nil {
-			slog.Debug(
-				"skipping due to null duration, probably deleted vid",
-				slog.String("title", info.Entries[i].Title),
-				slog.String("url", info.Entries[i].URL),
-			)
-			continue
-		}
-
-		meta := DownloadAsyncMeta{
-			PlaylistID:  playlist.ID,
-			URL:         info.Entries[i].URL,
-			GID:         gID,
-			Name:        info.Entries[i].Title,
-			DownloadFor: "playlist_vids",
-		}
-
-		b, err := json.Marshal(meta)
-		if err != nil {
-			slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
-			continue
-		}
-
-		_, err = d.Store.Enqueue(d.Ctx, store.EnqueueParams{
-			Meta:      string(b),
-			FailCount: 0,
-			Status:    "new",
-			JobType:   DownloadJob,
-		})
-		if err != nil {
-			slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
-			continue
-		}
-	}
-
-	return nil
-}
-
-func (d *DBot) loadPlaylistFromDB(name string, gID string) error {
-	playlist, err := d.Store.GetPlaylist(d.Ctx, store.GetPlaylistParams{
-		GuildID: gID,
-		Name:    name,
-	})
-	if err != nil {
-		return fmt.Errorf("could not find playlist: %w", err)
-	}
-
-	list, err := d.Store.ListPlaylistEntries(d.Ctx, playlist.ID)
-	if err != nil {
-		return fmt.Errorf("could not find playlist: %w", err)
-	}
-
-	for _, elem := range list {
-		d.MusicPlayer.Add(elem.Filepath)
 	}
 
 	return nil
