@@ -72,19 +72,6 @@ const (
 	backupError
 )
 
-func (s backupState) String() string {
-	switch s {
-	case backupScheduled:
-		return "scheduled"
-	case backupPending:
-		return "pending"
-	case backupUnavailable:
-		return "unavailable"
-	default:
-		return "error"
-	}
-}
-
 func backupJobMeta(gid, dir, url string) (string, error) {
 	meta, err := json.Marshal(BackupFileParams{OriginUrl: url, GID: gid, Dirs: dir})
 	if err != nil {

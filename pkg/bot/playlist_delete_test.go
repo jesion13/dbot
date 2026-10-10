@@ -198,13 +198,18 @@ func TestHandlePlaylistDeleteAuthorization(t *testing.T) {
 		require.NoError(t, err)
 
 		e, types := newDeleteEvent(t, testGID, discord.PermissionAdministrator, pl.ID)
-		// answerDeferred needs a rest client; only the authorization path is asserted
+		// answerDeferred needs a real rest client, so the handler panics when it tries to
+		// deliver the confirmation - by then the deletion has already happened
 		runHandler(t, func() error { return tb.handlePlaylistDelete(ctx, e) })
 
 		require.NotEmpty(t, *types)
 		assert.Equal(t, discord.InteractionResponseTypeDeferredCreateMessage, (*types)[0])
 		assert.True(t, isGuildAdmin(e))
-		_ = err
+
+		assert.Empty(t, tb.entries(t, pl.ID), "the playlist entries must be gone")
+		var deletedAt sql.NullString
+		require.NoError(t, scanDeletedAt(t, ctx, tb, pl.ID, &deletedAt))
+		assert.True(t, deletedAt.Valid, "the playlist must be soft deleted")
 	})
 
 	t.Run("non administrator is denied", func(t *testing.T) {
@@ -230,8 +235,8 @@ func TestHandlePlaylistDeleteAuthorization(t *testing.T) {
 	})
 }
 
-// TestPlaylistDeleteLeavesBackupDBAlone guards the rule structurally: the deletion
-// path never references the backup db or the filesystem.
+// TestPlaylistDeleteTouchesOnlyTheStore checks that deleting a playlist leaves the
+// shared cache alone: the artefact row and the file on disk both survive.
 func TestPlaylistDeleteTouchesOnlyTheStore(t *testing.T) {
 	tb := newTestBot(t)
 	ctx := tb.Ctx

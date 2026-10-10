@@ -85,6 +85,7 @@ flattening struct-valued attrs into dotted `Key.Field=value` lines (recursing in
 ### YouTube playlists (`pkg/bot/playlists.go`, `pkg/bot/yturl.go`)
 - `playlists` is keyed by `(guild_id, youtube_playlist_id)`; title is metadata only, so renaming on YouTube never forks a playlist. `playlist_entries` stores membership + position only — no file paths, no download state.
 - `/play <playlist url>` registers an unknown playlist with a full snapshot; a known one plays the **saved** snapshot. `/playlist name:<id> [update:true]` always plays the saved snapshot unless `update:true` explicitly re-syncs.
+- `/playlist-delete name:<id>` is admin-only: it re-checks `PermissionAdministrator` at runtime (registration's `DefaultMemberPermissions` is only a UI hint), soft-deletes the row (`deleted_at`) and drops its entries in one transaction. The row is kept so re-discovery reactivates it instead of duplicating it. It never touches the backup DB or files.
 - Snapshot writes go through `db.Store.WithTx` (upsert playlist → delete entries → insert positions → `last_synced_at`). No network I/O inside the transaction.
 - One shared video cache: `cachedVideo` (`pkg/bot/videocache.go`) looks up the canonical `https://www.youtube.com/watch?v=ID` in the backup DB, verifies the file exists, and otherwise enqueues a `BackupJob`. Playlists do not own files; removing an entry never deletes an artefact.
 

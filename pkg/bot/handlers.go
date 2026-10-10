@@ -76,14 +76,22 @@ func truncate(s string) string {
 // "thinking" response and falls back to a follow-up message. It always returns
 // ErrInteractionAnswered, because the interaction is consumed either way and a second
 // initial response would be rejected by discord.
-func (d *DBot) answerDeferred(e *events.ApplicationCommandInteractionCreate, content string) error {
+func (d *DBot) answerDeferred(e *events.ApplicationCommandInteractionCreate, content string, ephemeral bool) error {
+	followup := discord.MessageCreate{Content: content}
+	if ephemeral {
+		// a follow-up message is built fresh, so it needs the flag again - without it a
+		// private confirmation is posted publicly
+		followup.Flags = discord.MessageFlagEphemeral
+	}
 	return deliverDeferred(content,
 		func(c string) error {
 			_, err := d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{Content: &c})
 			return err
 		},
 		func(c string) error {
-			_, err := d.Client.Rest.CreateFollowupMessage(d.Client.ApplicationID, e.Token(), discord.MessageCreate{Content: c})
+			m := followup
+			m.Content = c
+			_, err := d.Client.Rest.CreateFollowupMessage(d.Client.ApplicationID, e.Token(), m)
 			return err
 		})
 }
@@ -136,9 +144,9 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 	err := d.play(ctx, e.GuildID().String(), e.User().ID.String(), url)
 	if deferred {
 		if err != nil {
-			return d.answerDeferred(e, err.Error())
+			return d.answerDeferred(e, err.Error(), false)
 		}
-		return d.answerDeferred(e, fmt.Sprintf("added %s", url))
+		return d.answerDeferred(e, fmt.Sprintf("added %s", url), false)
 	}
 	if err != nil {
 		return err
@@ -157,9 +165,9 @@ func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandI
 	}
 	answer := func(res queueResult, err error) error {
 		if err != nil {
-			return d.answerDeferred(e, err.Error())
+			return d.answerDeferred(e, err.Error(), false)
 		}
-		return d.answerDeferred(e, playlistQueuedMsg(res))
+		return d.answerDeferred(e, playlistQueuedMsg(res), false)
 	}
 
 	data := e.SlashCommandInteractionData()
@@ -168,23 +176,23 @@ func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandI
 
 	id, err := strconv.ParseInt(rawID, 10, 64)
 	if err != nil {
-		return d.answerDeferred(e, fmt.Sprintf("unknown playlist '%s'", rawID))
+		return d.answerDeferred(e, fmt.Sprintf("unknown playlist '%s'", rawID), false)
 	}
 
 	gID := e.GuildID().String()
 	pl, err := d.Store.GetPlaylist(ctx, store.GetPlaylistParams{ID: id, GuildID: gID})
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return d.answerDeferred(e, ErrPlaylistNotFound.Error())
+			return d.answerDeferred(e, ErrPlaylistNotFound.Error(), false)
 		}
-		return d.answerDeferred(e, fmt.Sprintf("lookup playlist: %v", err))
+		return d.answerDeferred(e, fmt.Sprintf("lookup playlist: %v", err), false)
 	}
 
 	if update {
 		pl, err = d.syncPlaylist(ctx, pl)
 		if err != nil {
 			// no stale-snapshot fallback: the user asked for a sync that failed
-			return d.answerDeferred(e, err.Error())
+			return d.answerDeferred(e, err.Error(), false)
 		}
 	}
 
@@ -198,7 +206,7 @@ func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandI
 		return answer(queueResult{}, err)
 	}
 	if res.queued == 0 {
-		return d.answerDeferred(e, ErrNoPlayableEntries.Error())
+		return d.answerDeferred(e, ErrNoPlayableEntries.Error(), false)
 	}
 	return answer(res, nil)
 }
@@ -222,9 +230,9 @@ func playlistQueuedMsg(res queueResult) string {
 	return msg
 }
 
-// ErrNotAuthorized is returned when a guild-administrator command is invoked by
-// someone who is not one, or outside a guild.
-var ErrNotAuthorized = errors.New("you need to be a server administrator")
+// errNotAuthorized is shown when a guild-administrator command is invoked by someone
+// who is not one, or outside a guild.
+const errNotAuthorized = "you need to be a server administrator"
 
 // isGuildAdmin re-checks the permission at runtime. Command registration is only a
 // UI hint, so it can never be what authorizes the mutation.
@@ -246,12 +254,12 @@ func (d *DBot) handlePlaylistDelete(ctx context.Context, e *events.ApplicationCo
 	}
 
 	if !isGuildAdmin(e) {
-		return d.answerDeferred(e, ErrNotAuthorized.Error())
+		return d.answerDeferred(e, errNotAuthorized, true)
 	}
 
 	id, err := strconv.ParseInt(e.SlashCommandInteractionData().String("name"), 10, 64)
 	if err != nil {
-		return d.answerDeferred(e, "unknown playlist")
+		return d.answerDeferred(e, "unknown playlist", true)
 	}
 
 	title, err := d.deletePlaylist(ctx, id, e.GuildID().String())
@@ -259,12 +267,12 @@ func (d *DBot) handlePlaylistDelete(ctx context.Context, e *events.ApplicationCo
 		if errors.Is(err, ErrPlaylistNotFound) || errors.Is(err, sql.ErrNoRows) {
 			// covers "does not exist", "another guild" and "already deleted" without
 			// telling the caller which
-			return d.answerDeferred(e, "playlist not found")
+			return d.answerDeferred(e, "playlist not found", true)
 		}
-		return d.answerDeferred(e, "could not delete playlist")
+		return d.answerDeferred(e, "could not delete playlist", true)
 	}
 
-	return d.answerDeferred(e, fmt.Sprintf("Deleted playlist %q. Cached videos were kept.", title))
+	return d.answerDeferred(e, fmt.Sprintf("Deleted playlist %q. Cached videos were kept.", title), true)
 }
 
 func (d *DBot) handleWypierdalaj(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
