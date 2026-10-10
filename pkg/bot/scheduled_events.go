@@ -2,8 +2,8 @@ package dbot
 
 import (
 	"github.com/disgoorg/snowflake/v2"
-	"log/slog"
 	"github.com/go-co-op/gocron/v2"
+	"log/slog"
 )
 
 func (d *DBot) StartScheduler() {

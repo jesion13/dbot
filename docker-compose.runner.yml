@@ -1,0 +1,14 @@
+services:
+  runner:
+    build:
+      context: .github/runner
+    restart: always
+    env_file:
+      - .runner.env
+    volumes:
+      - go-mod-cache:/go/pkg/mod
+      - go-build-cache:/home/runner/.cache/go-build
+
+volumes:
+  go-mod-cache:
+  go-build-cache:

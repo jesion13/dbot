@@ -9,6 +9,7 @@ tmp
 test.db*
 cookies.txt
 .prod.env
+.runner.env
 .aider*
 data/audio-cache.db
 data

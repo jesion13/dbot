@@ -17,8 +17,8 @@ import (
 
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
-	"log/slog"
 	"github.com/pion/opus/pkg/oggreader"
+	"log/slog"
 )
 
 // framePacer paces opus frame sends to real-time (20ms/frame), matching

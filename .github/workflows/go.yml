@@ -1,0 +1,21 @@
+name: Go
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: [self-hosted, dbot]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -timeout 60s

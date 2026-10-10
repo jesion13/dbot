@@ -1,11 +1,14 @@
 package dbot
 
 import (
-	"database/sql"
+	"context"
 	"errors"
-	"path/filepath"
+	"strings"
 	"testing"
 
+	"dbot/pkg/config"
+	"dbot/pkg/db"
+	"dbot/pkg/db/types"
 	"dbot/pkg/store"
 
 	"github.com/stretchr/testify/require"
@@ -14,14 +17,35 @@ import (
 
 const testGID = "492318912881491981"
 
+// openTestStore runs real migrations into a fresh temp DB and seeds the
+// handful of sounds/aliases the matching tests below expect.
 func openTestStore(t *testing.T) *store.Queries {
 	t.Helper()
-	path, err := filepath.Abs("../../test.db")
+	config.DB_DIR = t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	q, err := db.ConnectStore(ctx, "test.db", "")
 	require.NoError(t, err)
-	db, err := sql.Open("sqlite", path)
-	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() })
-	return store.New(db)
+
+	seedSounds := []struct {
+		url     string
+		aliases string
+	}{
+		{"https://example.com/honk.mp4", "honk"},
+		{"https://example.com/hejnal.mp4", "hejnał,hejnalmariacki"},
+		{"https://example.com/cymbal.mp4", "cymbał,cymbal"},
+	}
+	for _, s := range seedSounds {
+		_, err := q.AddSound(ctx, store.AddSoundParams{
+			Gid:     testGID,
+			Url:     s.url,
+			Aliases: types.Aliases(strings.Split(s.aliases, ",")),
+		})
+		require.NoError(t, err)
+	}
+
+	return q
 }
 
 func TestFindSound(t *testing.T) {

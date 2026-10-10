@@ -301,8 +301,8 @@ func (d *DBot) play(gID, uID string, url string) error {
 			return fmt.Errorf("failed searching: %w", err)
 		}
 
-	case strings.Contains(url, "/playlist") || strings.Contains(url,"&list="):
-		err := d.playFromYTPlaylist(url,gID)
+	case strings.Contains(url, "/playlist") || strings.Contains(url, "&list="):
+		err := d.playFromYTPlaylist(url, gID)
 		if err != nil {
 			return fmt.Errorf("failed load playlist: %w", err)
 		}
@@ -353,7 +353,7 @@ func (d *DBot) searchAndPlay(url string) error {
 	return nil
 }
 
-func (d *DBot) playFromYTPlaylist(url string,gID string) error {
+func (d *DBot) playFromYTPlaylist(url string, gID string) error {
 	info, err := d.PlaylistInfo(url)
 	if err != nil {
 		return fmt.Errorf("failed getting playlist info: %w", err)
