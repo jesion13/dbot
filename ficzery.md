@@ -2,10 +2,6 @@
 - ~naprawic index conflic w tabeli sounds~
 - ~scheduled events, papaj środowa noc (H)~
 - wykrywanie duplikatów meme (H)
-- minIO access via bot (H)
-  - postawić minIO na serverku
-  -   ~bo zapisuje wszystkie `sound` i `audio/video` odpalane przez `MusicPlayer` w minIO~
-  - bot zapisuje wszystkie meme i video na minIO
 - ~tworzenie sounds (H)~
   - ~pobieranie attachment z discorda~
   - ~pobieranie pliku z linku~
@@ -15,9 +11,8 @@
   - ~przyjmować linki~
 - musicPlayer interface (L)
 - lista sound (L)
-- gify z filmów (L)
-- DST points (L)
-  - darmowe punkty
+~- gify z filmów (L)~
+~- DST points (L)~
 
 
 

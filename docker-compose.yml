@@ -11,5 +11,5 @@ services:
     volumes:
      - ./.prod.env:/dbot/.env
      - ./prod-data:/dbot/prod-data
-     - /tmp/dbot:/tmp/dbot
+     - ./prod-tmp/dbot:/tmp/dbot
      - /attached-storage/server/static/bot/:/attached-storage/dbot
