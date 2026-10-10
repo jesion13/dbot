@@ -79,8 +79,6 @@ github.com/fatih/structtag v1.2.0 h1:/OdNE99OxoI/PqaW/SuSK9uxxT3f/tcSZgon/ssNSx4
 github.com/fatih/structtag v1.2.0/go.mod h1:mBJUNpUnHmRKrKlQQlmCrh5PuhftFbNv8Ys4/aAZl94=
 github.com/fr-str/env v0.0.0-20240805161223-e2010c5d2e5c h1:wX2NQUsvZiUl9SPUheOKOPVuF73ME6Ikhg5C9DEWQNs=
 github.com/fr-str/env v0.0.0-20240805161223-e2010c5d2e5c/go.mod h1:+Kct9G54032gjl7OQfPQB4io0wy/Wi6R2LGObG75bGA=
-github.com/fr-str/log v0.0.0-20250315103416-41f3046ae856 h1:Cyq2Z+uCqKjKN3E+vR0eDgMOYwWcegDuIORjbJ+JQTM=
-github.com/fr-str/log v0.0.0-20250315103416-41f3046ae856/go.mod h1:CJtd6bf1WAtyavqCQZ0Q+OjjM+BKVK53lMIHA+tqzQw=
 github.com/ghodss/yaml v1.0.0/go.mod h1:4dBDuWmgqj2HViK6kFavaiC9ZROes6MMH2rRYeMEF04=
 github.com/go-co-op/gocron/v2 v2.18.0 h1:DS3Uhru66q1jy/5f9V0itmi3cLXcn2b7N+duGfgT7gU=
 github.com/go-co-op/gocron/v2 v2.18.0/go.mod h1:Zii6he+Zfgy5W9B+JKk/KwejFOW0kZTFvHtwIpR4aBI=

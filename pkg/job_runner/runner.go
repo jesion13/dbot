@@ -4,12 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
 	"dbot/pkg/store"
-
-	"github.com/fr-str/log"
 )
 
 type Runner struct {
@@ -61,16 +60,16 @@ func (r Runner) Loop() {
 				time.Sleep(time.Second * 5)
 				goto Select
 			}
-			log.Error("failed to get item from queue", log.Err(err))
+			slog.Error("failed to get item from queue", slog.Any("error", err))
 			time.Sleep(5 * time.Second)
 			goto Select
 		}
 
 		job = r.getJob(entry.JobType)
-		log.Trace("running job", log.String("key", entry.JobType), log.String("meta", entry.Meta))
+		slog.Debug("running job", slog.String("key", entry.JobType), slog.String("meta", entry.Meta))
 		err = job(entry.Meta)
 		if err != nil {
-			log.Error("failed running job", log.Err(err))
+			slog.Error("failed running job", slog.Any("error", err))
 			updated = store.UpdateQueueEntryParams{
 				FailCount: entry.FailCount + 1,
 				LastMsg: sql.NullString{
@@ -90,7 +89,7 @@ func (r Runner) Loop() {
 		}
 		err = r.store.UpdateQueueEntry(r.ctx, updated)
 		if err != nil {
-			log.Error("failed updating queue entry", log.Err(err))
+			slog.Error("failed updating queue entry", slog.Any("error", err))
 		}
 
 	Select:

@@ -2,14 +2,14 @@ package dbot
 
 import (
 	"github.com/disgoorg/snowflake/v2"
-	"github.com/fr-str/log"
+	"log/slog"
 	"github.com/go-co-op/gocron/v2"
 )
 
 func (d *DBot) StartScheduler() {
 	s, err := gocron.NewScheduler()
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 		return
 	}
 
@@ -19,19 +19,19 @@ func (d *DBot) StartScheduler() {
 		gocron.NewTask(d.papaj),
 	)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 	}
-	log.Trace(j.Name())
+	slog.Debug(j.Name())
 
 	j, err = s.NewJob(
 		gocron.CronJob("0 16,18,20,22,0 * * 3", false),
 		gocron.NewTask(d.środowaNoc),
 	)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 	}
 
-	log.Trace(j.Name())
+	slog.Debug(j.Name())
 	s.Start()
 }
 
@@ -39,7 +39,7 @@ func (d *DBot) papaj() {
 	if d.MusicPlayer.VC == nil {
 		err := d.findVoiceChannel()
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 			return
 		}
 	}
@@ -53,7 +53,7 @@ func (d *DBot) środowaNoc() {
 	if d.MusicPlayer.VC == nil {
 		err := d.findVoiceChannel()
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 			return
 		}
 	}

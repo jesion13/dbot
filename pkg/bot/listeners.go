@@ -19,7 +19,7 @@ import (
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
-	"github.com/fr-str/log"
+	"log/slog"
 )
 
 func (d *DBot) RegisterEventListiners() {
@@ -38,7 +38,7 @@ func (d *DBot) RegisterEventListiners() {
 func createContextTmpDir(ctx context.Context) context.Context {
 	dir, err := os.MkdirTemp(config.TMP_PATH, strconv.Itoa(int(time.Now().UnixNano())))
 	if err != nil {
-		log.Error("dupa", log.Err(err))
+		slog.Error("dupa", slog.Any("error", err))
 	}
 
 	ctx = context.WithValue(ctx, config.DirKey, dir)
@@ -66,7 +66,7 @@ func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(e *events.Applic
 					})
 					return
 				}
-				log.Error("uuu duuuuuuuuuuuuuuuuuupa", log.Err(err), log.String("cmd", name), log.String("err_type", fmt.Sprintf("%T", err)))
+				slog.Error("uuu duuuuuuuuuuuuuuuuuupa", slog.Any("error", err), slog.String("cmd", name), slog.String("err_type", fmt.Sprintf("%T", err)))
 
 				msg := err.Error()
 				if errors.Is(err, ytdlp.ErrFailedToDownload) {
@@ -77,7 +77,7 @@ func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(e *events.Applic
 				}
 				_, err := d.Client.Rest.CreateMessage(e.Channel().ID(), discord.MessageCreate{Content: msg})
 				if err != nil {
-					log.Error("response failed", log.Err(err))
+					slog.Error("response failed", slog.Any("error", err))
 				}
 			}
 		}
@@ -88,7 +88,7 @@ func (d *DBot) autocomplete(e *events.AutocompleteInteractionCreate) {
 	if e.Data.CommandName == "load-playlist" {
 		err := d.autocompleteForPlayPlaylist(e)
 		if err != nil {
-			log.Error("autocomplete failed", log.Err(err))
+			slog.Error("autocomplete failed", slog.Any("error", err))
 		}
 	}
 }
@@ -100,7 +100,7 @@ func (d *DBot) messagesEditListener(e *events.GuildMessageUpdate) {
 
 	// err := updateBackupMessage(d, e.Message)
 	// if err != nil {
-	// 	log.Error("updateBackupMessage", log.Err(err))
+	// 	return err
 	// }
 }
 
@@ -111,7 +111,7 @@ func (d *DBot) messageDeleteListener(e *events.GuildMessageDelete) {
 		Msgid: e.MessageID.String(),
 	})
 	if err != nil {
-		log.Error("failed to delete artefact", log.Err(err))
+		slog.Error("failed to delete artefact", slog.Any("error", err))
 	}
 }
 
@@ -137,7 +137,7 @@ func (d *DBot) messagesListener(e *events.GuildMessageCreate) {
 	}
 	// err := backupMessage(d, m)
 	// if err != nil {
-	// 	log.Error("backupMessage", log.Err(err))
+	// 	return err
 	// }
 
 	isKnownSound(d, m)
@@ -164,13 +164,13 @@ func transcodeToh264(d *DBot, m discord.Message) {
 		}
 		meta, err := d.DownloadVideo(ctx, att.URL)
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 			continue
 		}
 
 		videoInfo, err := ffmpeg.Probe(meta.Filepath)
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 			continue
 		}
 		for i := range videoInfo.Streams {
@@ -188,7 +188,7 @@ func transcodeToh264(d *DBot, m discord.Message) {
 			// transcode and upload
 			f, err := ffmpeg.ConvertToMP4(ctx, meta.Filepath, ffmpeg.Clip{})
 			if err != nil {
-				log.Error("transcodeAndReupload", log.Err(err))
+				slog.Error("transcodeAndReupload", slog.Any("error", err))
 				return
 			}
 			defer f.Close()
@@ -199,7 +199,7 @@ func transcodeToh264(d *DBot, m discord.Message) {
 				},
 			})
 			if err != nil {
-				log.Error("transcodeAndReupload", log.Err(err))
+				slog.Error("transcodeAndReupload", slog.Any("error", err))
 				return
 			}
 			d.Client.Rest.AddReaction(msg.ChannelID, msg.ID, "skipper:1330256451331031162")
@@ -213,7 +213,7 @@ func soundAll(d *DBot, m discord.Message) {
 		return
 	}
 
-	log.Debug("sound all", log.String("msg", normalized))
+	slog.Debug("sound all", slog.String("msg", normalized))
 
 	gID := ""
 	if m.GuildID != nil {
@@ -222,7 +222,7 @@ func soundAll(d *DBot, m discord.Message) {
 
 	sounds, err := d.Store.SelectSounds(d.Ctx, gID)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 		return
 	}
 
@@ -235,7 +235,7 @@ func soundAll(d *DBot, m discord.Message) {
 	}
 	err = d.connectVoice(*m.GuildID, m.Author.ID)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 		return
 	}
 
@@ -247,7 +247,7 @@ func soundAll(d *DBot, m discord.Message) {
 func isKnownSound(d *DBot, m discord.Message) {
 	msg := m.Content
 	normalized := normalize(m.Content)
-	log.Debug("isKnownSound", log.String("msg", msg), log.String("normalized", normalized))
+	slog.Debug("isKnownSound", slog.String("msg", msg), slog.String("normalized", normalized))
 
 	gID := ""
 	if m.GuildID != nil {
@@ -257,7 +257,7 @@ func isKnownSound(d *DBot, m discord.Message) {
 	sound, err := findSound(d.Store, normalized, gID)
 	if err != nil {
 		if !errors.Is(err, ErrSoundNotFound) {
-			log.Info("failed to find sound", log.Err(err))
+			slog.Info("failed to find sound", slog.Any("error", err))
 		}
 		return
 	}
@@ -271,7 +271,7 @@ func isKnownSound(d *DBot, m discord.Message) {
 			d.Client.Rest.CreateMessage(m.ChannelID, discord.MessageCreate{Content: "Voice is disabled"})
 			return
 		}
-		log.Error(err.Error())
+		slog.Error(err.Error())
 		return
 	}
 
@@ -279,19 +279,19 @@ func isKnownSound(d *DBot, m discord.Message) {
 		if strings.Contains(s.Url, "riotgames") {
 			continue
 		}
-		log.Trace("isKnownSound", log.Any("sound.Url", s.Url), log.Any("name", s.Aliases))
+		slog.Debug("isKnownSound", slog.Any("sound.Url", s.Url), slog.Any("name", s.Aliases))
 		d.MusicPlayer.PlaySound(s.Url)
 	}
 }
 
 func (d *DBot) onUserVoiceStateChange(e *events.GuildVoiceStateUpdate) {
-	log.Trace("onUserVoiceStateChange", log.Any("d.MusicPlayer.VC == nil", d.MusicPlayer.VC == nil))
+	slog.Debug("onUserVoiceStateChange", slog.Any("d.MusicPlayer.VC == nil", d.MusicPlayer.VC == nil))
 	if d.MusicPlayer.VC == nil {
 		return
 	}
 
 	botChanID := d.MusicPlayer.VCID
-	log.Trace("onUserVoiceStateChange", log.Any("botChanID", botChanID))
+	slog.Debug("onUserVoiceStateChange", slog.Any("botChanID", botChanID))
 	gID := e.VoiceState.GuildID
 	var botChanUserCount int
 	for vs := range d.Client.Caches.VoiceStates(gID) {

@@ -2,10 +2,10 @@ package dbot
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
-	"github.com/fr-str/log"
 )
 
 // descryptions are requeired by Discord
@@ -140,13 +140,13 @@ var cmds = []discord.ApplicationCommandCreate{
 func (d *DBot) ClearCmds() {
 	c, err := d.Client.Rest.GetGuildCommands(d.Client.ApplicationID, d.GuildID, false)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 	}
 
 	for _, v := range c {
 		err := d.Client.Rest.DeleteGuildCommand(d.Client.ApplicationID, d.GuildID, v.ID())
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 		}
 	}
 }

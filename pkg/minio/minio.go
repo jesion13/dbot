@@ -2,11 +2,11 @@ package minio
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 
 	"dbot/pkg/config"
 
-	"github.com/fr-str/log"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -37,7 +37,7 @@ func NewMinioStore(ctx context.Context) (Minio, error) {
 
 	err = ret.createDefaultBucket(ctx)
 	if err != nil {
-		log.Error(err.Error())
+		slog.Error(err.Error())
 	}
 
 	return ret, nil
@@ -50,13 +50,13 @@ func (m *Minio) createDefaultBucket(ctx context.Context) error {
 		// Check to see if we already own this bucket (which happens if you run this twice)
 		exists, errBucketExists := m.BucketExists(ctx, bucketName)
 		if errBucketExists == nil && exists {
-			log.Trace("bucket exists", log.String("name", bucketName))
+			slog.Debug("bucket exists", slog.String("name", bucketName))
 			return nil
 		}
 		return err
 	}
 
-	log.Info("Successfully created", log.String("name", bucketName))
+	slog.Info("Successfully created", slog.String("name", bucketName))
 
 	return nil
 }
@@ -65,7 +65,7 @@ func (m *Minio) createDefaultBucket(ctx context.Context) error {
 // example: name=dupa/123/dupa
 // will create same structure in config.MINIO_DBOT_BUCKET
 func (m Minio) CreateFolderStructure(ctx context.Context, name string) error {
-	log.Trace("CreateFolderStructure", log.String("name", name))
+	slog.Debug("CreateFolderStructure", slog.String("name", name))
 	var currentPath strings.Builder
 	for folder := range strings.SplitSeq(name, "/") {
 		currentPath.WriteString(folder + "/")
@@ -74,7 +74,7 @@ func (m Minio) CreateFolderStructure(ctx context.Context, name string) error {
 		// 	continue
 		// }
 
-		log.Trace("CreateFolderStructure", log.Any("currentPath", currentPath.String()))
+		slog.Debug("CreateFolderStructure", slog.Any("currentPath", currentPath.String()))
 		_, err := m.PutObject(ctx, config.MINIO_DBOT_BUCKET_NAME, currentPath.String(), nil, 0, minio.PutObjectOptions{})
 		if err != nil {
 			return err

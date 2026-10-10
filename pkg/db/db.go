@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,10 +15,9 @@ import (
 	"dbot/pkg/backup"
 	"dbot/pkg/cache"
 	"dbot/pkg/config"
+	dbotlog "dbot/pkg/logger"
 	"dbot/pkg/store"
 
-	"github.com/fr-str/log"
-	"github.com/fr-str/log/level"
 	"github.com/pressly/goose/v3"
 	"modernc.org/sqlite"
 )
@@ -58,7 +58,7 @@ func ConnectAudioCache(ctx context.Context, filename string, schema string) (*ca
 }
 
 func ConnectStore(ctx context.Context, filename string, schema string) (*store.Queries, error) {
-	log.Trace("[dupa]", log.Any("filepath.Join(config.DB_DIR, filename)", filepath.Join(config.DB_DIR, filename)))
+	slog.Debug("[dupa]", slog.String("filepath.Join(config.DB_DIR, filename)", filepath.Join(config.DB_DIR, filename)))
 	w, err := sql.Open("sqlite", filepath.Join(config.DB_DIR, filename))
 	if err != nil {
 		return nil, err
@@ -173,35 +173,31 @@ func relaceConsecutiveSpaces(s string) string {
 }
 
 func logger(ctx context.Context, info string, query string, ts time.Time, args any, res sql.Result, err error) {
-	if !log.DefaultLogger.Logger.Enabled(ctx, level.Trace-1) {
-		return
-	}
 	timeSince := time.Since(ts).String()
 	query = strings.ReplaceAll(query, "\n", " ")
 	query = strings.ReplaceAll(query, "\t", " ")
 	query = relaceConsecutiveSpaces(query)
 	meta := []any{
-		log.String("query", query),
-		log.Any("args", args),
-		log.String("duration", timeSince),
+		slog.String("query", query),
+		slog.Any("args", args),
+		slog.String("duration", timeSince),
 	}
 
 	if res != nil {
 		rows, err := res.RowsAffected()
 		if err != nil {
-			meta = append(meta, log.String("rows_error", err.Error()))
-			log.Error("Rows affected failed", meta...)
+			meta = append(meta, slog.String("rows_error", err.Error()))
+			slog.Error("Rows affected failed", meta...)
 		}
-		meta = append(meta, log.Int("rows", rows))
+		meta = append(meta, slog.Int64("rows", rows))
 	}
 	if err != nil {
-		meta = append(meta, log.Err(err))
+		meta = append(meta, slog.Any("error", err))
 		e := &sqlite.Error{}
 		if !errors.As(err, &e) {
-			log.Error(fmt.Sprintf("%s failed", info), meta...)
+			slog.Error(fmt.Sprintf("%s failed", info), meta...)
 			return
 		}
 	}
-	log.DefaultLogger.Logger.Log(ctx, level.Trace-1, fmt.Sprintf("%s executed", info), meta...)
-	// log.TraceCtx(ctx, fmt.Sprintf("%s executed", info), meta...)
+	slog.Default().Log(ctx, dbotlog.LevelSQL, fmt.Sprintf("%s executed", info), meta...)
 }

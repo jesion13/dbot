@@ -17,7 +17,7 @@ import (
 
 	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
-	"github.com/fr-str/log"
+	"log/slog"
 	"github.com/pion/opus/pkg/oggreader"
 )
 
@@ -136,7 +136,7 @@ func (p *Player) PlaySound(link string) {
 
 func (p *Player) musicLoop() {
 	for a := range p.list.nextAudio {
-		log.Debug("list.nextAudio", log.JSON(a))
+		slog.Debug("list.nextAudio", slog.Any("a", a))
 		if len(a.Filepath) == 0 && strings.Contains(a.Link, p.VC.GuildID().String()) {
 			a.Filepath = filepath.Join(config.BACKUP_DIR, a.Link)
 		}
@@ -147,7 +147,7 @@ func (p *Player) musicLoop() {
 			continue
 		}
 
-		log.Trace("musicLoop", log.Bool("p.list.more()", p.list.more()))
+		slog.Debug("musicLoop", slog.Bool("p.list.more()", p.list.more()))
 		if !p.list.more() {
 			p.PlayPause()
 		}
@@ -199,7 +199,7 @@ func (p *Player) fetch(audio *Audio) error {
 func (p *Player) playV2(audio *Audio) error {
 	var err error
 	var pipe io.ReadCloser
-	log.Debug("playV2", log.JSON(audio))
+	slog.Debug("playV2", slog.Any("audio", audio))
 	ytdlpCMD := exec.Command("yt-dlp", "--no-playlist", "-f", "bestaudio", "-o", "-", audio.Link)
 	if audio.Filepath == "" {
 		pipe, err = ytdlpCMD.StdoutPipe()
@@ -259,7 +259,7 @@ func (p *Player) playV2(audio *Audio) error {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
 			if err != io.EOF {
-				log.Error("failed to parse page", log.Err(err))
+				slog.Error("failed to parse page", slog.Any("error", err))
 			}
 			break
 		}
@@ -270,7 +270,7 @@ func (p *Player) playV2(audio *Audio) error {
 			_, err := p.VC.UDP().Write(frame)
 			p.Unlock()
 			if err != nil {
-				log.Error("failed to write opus frame", log.Err(err))
+				slog.Error("failed to write opus frame", slog.Any("error", err))
 			}
 		}
 	}
@@ -290,7 +290,7 @@ const dynaudnorm = `dynaudnorm=f=150:g=15:p=0.95:m=50.0`
 func (p *Player) playSound(audio *Audio) error {
 	p.Playing.Store(true)
 	defer p.Playing.Store(false)
-	log.Debug("playSound", log.JSON(audio))
+	slog.Debug("playSound", slog.Any("audio", audio))
 	cmd := exec.Command(
 		"ffmpeg", "-hide_banner", "-loglevel", "error",
 		"-i", audio.Filepath,
@@ -311,7 +311,7 @@ func (p *Player) playSound(audio *Audio) error {
 		return fmt.Errorf("failed to create Stdout pipe: %w", err)
 	}
 
-	log.Info("playSound", log.String("cmd", cmd.String()))
+	slog.Info("playSound", slog.String("cmd", cmd.String()))
 	err = cmd.Start()
 	if err != nil {
 		return fmt.Errorf("cmd.Start failed: %w", err)
@@ -330,7 +330,7 @@ func (p *Player) playSound(audio *Audio) error {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
 			if err != io.EOF {
-				log.Error("failed to parse page", log.Err(err))
+				slog.Error("failed to parse page", slog.Any("error", err))
 			}
 			break
 		}
@@ -338,7 +338,7 @@ func (p *Player) playSound(audio *Audio) error {
 		for _, frame := range page {
 			pacer.wait()
 			if _, err := p.VC.UDP().Write(frame); err != nil {
-				log.Error("failed to write opus frame", log.Err(err))
+				slog.Error("failed to write opus frame", slog.Any("error", err))
 			}
 		}
 	}

@@ -8,7 +8,6 @@ require (
 	github.com/disgoorg/godave/golibdave v0.1.0
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/fr-str/env v0.0.0-20240805161223-e2010c5d2e5c
-	github.com/fr-str/log v0.0.0-20250315103416-41f3046ae856
 	github.com/go-co-op/gocron/v2 v2.18.0
 	github.com/matryer/is v1.4.1
 	github.com/minio/minio-go/v7 v7.0.97
@@ -121,8 +120,6 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
-
-// replace github.com/fr-str/log v0.0.0-20241018144247-aa7387603e38 => ../log
 
 tool (
 	github.com/pressly/goose/v3/cmd/goose

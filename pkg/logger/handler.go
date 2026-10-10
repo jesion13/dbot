@@ -13,25 +13,48 @@ import (
 
 const timeFormat = "15:04:05.000"
 
+// LevelSQL is a verbosity level below slog.LevelDebug, intended for very
+// noisy per-query logging (see pkg/db) that most Debug sessions don't want.
+const LevelSQL = slog.LevelDebug - 4
+
 // Handler is a slog.Handler that renders:
 //
-//	15:04:05.000 LEVEL pkg/file.go:123 message {
+//	15:04:05.000 LEVEL pkg/file.go:123 message
 //	   Key=value
 //	   Struct.Field=value
-//	}
 type Handler struct {
-	out io.Writer
+	out   io.Writer
+	level slog.Level
 }
 
-func NewHandler(out io.Writer) *Handler {
-	return &Handler{out: out}
+// NewHandler returns a Handler that logs records at level and above.
+func NewHandler(out io.Writer, level slog.Level) *Handler {
+	return &Handler{out: out, level: level}
 }
 
-func (h *Handler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *Handler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= h.level
+}
+
+// ANSI color codes, matching fr-str/log's old TextHandler palette.
+const (
+	colorReset   = "\x1b[0m"
+	colorGrey    = "\x1b[90m"
+	colorRed     = "\x1b[31;1m"
+	colorYellow  = "\x1b[33;1m"
+	colorBlue    = "\x1b[34;1m"
+	colorMagenta = "\x1b[35;1m"
+	colorWhite   = "\x1b[37;1m"
+)
 
 func (h *Handler) Handle(_ context.Context, r slog.Record) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %-5s %s %s", r.Time.Format(timeFormat), r.Level.String(), caller(r.PC), r.Message)
+	level := fmt.Sprintf("%-5s", levelString(r.Level))
+	fmt.Fprintf(&b, "%s %s%s%s %s%s%s %s",
+		r.Time.Format(timeFormat),
+		levelColor(r.Level), level, colorReset,
+		colorGrey, caller(r.PC), colorReset,
+		r.Message)
 
 	lines := make([]string, 0, r.NumAttrs())
 	r.Attrs(func(a slog.Attr) bool {
@@ -39,26 +62,41 @@ func (h *Handler) Handle(_ context.Context, r slog.Record) error {
 		return true
 	})
 
-	if len(lines) == 0 {
-		b.WriteByte('\n')
-		_, err := io.WriteString(h.out, b.String())
-		return err
-	}
-
-	b.WriteString(" {\n")
+	b.WriteByte('\n')
 	for _, line := range lines {
 		b.WriteString("   ")
 		b.WriteString(line)
 		b.WriteByte('\n')
 	}
-	b.WriteString("}\n")
 
 	_, err := io.WriteString(h.out, b.String())
 	return err
 }
 
 func (h *Handler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *Handler) WithGroup(string) slog.Handler       { return h }
+func (h *Handler) WithGroup(string) slog.Handler      { return h }
+
+func levelString(l slog.Level) string {
+	if l == LevelSQL {
+		return "SQL"
+	}
+	return l.String()
+}
+
+func levelColor(l slog.Level) string {
+	switch {
+	case l == LevelSQL:
+		return colorWhite
+	case l < slog.LevelInfo:
+		return colorMagenta
+	case l < slog.LevelWarn:
+		return colorBlue
+	case l < slog.LevelError:
+		return colorYellow
+	default:
+		return colorRed
+	}
+}
 
 func caller(pc uintptr) string {
 	if pc == 0 {

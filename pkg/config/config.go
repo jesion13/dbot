@@ -21,8 +21,9 @@ var (
 	// and all <-config.Ctx.Done() will be unblocked
 	Ctx, cancel = context.WithCancel(context.Background())
 
-	ENV    string
-	DB_DIR string
+	ENV       string
+	LOG_LEVEL string
+	DB_DIR    string
 
 	TOKEN    string
 	GUILD_ID string
@@ -45,6 +46,7 @@ var (
 func Load() {
 	defer cancel()
 	ENV = env.Get("ENV", "dev")
+	LOG_LEVEL = env.Get("LOG_LEVEL", "debug")
 	DB_DIR = env.Get("DB_DIR", "data")
 	TOKEN = env.Get("TOKEN", "")
 	GUILD_ID = env.Get("GUILD_ID", "")
@@ -54,6 +56,7 @@ func Load() {
 	BACKUP_DIR = env.Get("BACKUP_DIR", filepath.Join(os.TempDir(), "dbot", "backup"))
 
 	fmt.Println("ENV =", ENV)
+	fmt.Println("LOG_LEVEL =", LOG_LEVEL)
 	fmt.Println("DB_DIR =", DB_DIR)
 	fmt.Println("GUILD_ID =", GUILD_ID)
 	fmt.Println("TMP_PATH =", TMP_PATH)

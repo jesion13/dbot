@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,7 +25,6 @@ import (
 	"dbot/pkg/config"
 
 	"github.com/disgoorg/disgo/discord"
-	"github.com/fr-str/log"
 )
 
 func must[T any](v T, err error) T {
@@ -93,7 +93,7 @@ func BackupAttachment(d *DBot, m discord.Message) (BackupFile, string, error) {
 	var info BackupFile
 	att := make([]string, len(m.Attachments))
 	for i, a := range m.Attachments {
-		log.Info("downloading attachment", log.String("url", a.URL))
+		slog.Info("downloading attachment", slog.String("url", a.URL))
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
@@ -149,10 +149,10 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 
 	hash, err := generateHash(params.ContentType, &buf)
 	if err != nil {
-		log.Error("img hash failed", log.Err(err), log.String("content", params.ContentType), log.String("url", params.OriginUrl))
+		slog.Error("img hash failed", slog.Any("error", err), slog.String("content", params.ContentType), slog.String("url", params.OriginUrl))
 	}
 
-	log.Trace("[dupa]", log.Uint("hash", hash), log.String("content", params.ContentType))
+	slog.Debug("[dupa]", slog.Uint64("hash", hash), slog.String("content", params.ContentType))
 	if hash > 0 {
 		art, unique := d.checkHashAgainstDB(params.GID, hash)
 		if !unique {
@@ -187,17 +187,17 @@ func (d *DBot) checkHashAgainstDB(gid string, hash uint64) (art backup.Artefact,
 			Offset: offset,
 		})
 		if err != nil {
-			log.Error("failed to get Artiefacts", log.Err(err))
+			slog.Error("failed to get Artiefacts", slog.Any("error", err))
 			return backup.Artefact{}, true
 		}
 		for _, d := range data {
 			hash2 := goimagehash.NewExtImageHash([]uint64{uint64(d.Hash)}, goimagehash.DHash, 64)
 			dist, err := hash1.Distance(hash2)
 			if err != nil {
-				log.Error("failed to calc distance", log.Err(err))
+				slog.Error("failed to calc distance", slog.Any("error", err))
 			}
 			if dist <= 3 {
-				log.Trace("[dupa]", log.Any("dist", dist))
+				slog.Debug("[dupa]", slog.Any("dist", dist))
 				return d, false
 			}
 		}
@@ -277,7 +277,7 @@ func (d *DBot) backupFile(params BackupFileParams) (BackupFile, error) {
 		return backupFile, fmt.Errorf("failed to copy file: %w", err)
 	}
 
-	log.Trace("backupFile", log.String("name", pf), log.Int("size", n))
+	slog.Debug("backupFile", slog.String("name", pf), slog.Int64("size", n))
 	backupFile.Name = strings.TrimLeft(f.Name(), config.BACKUP_DIR)
 	backupFile.Size = n
 

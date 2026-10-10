@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -15,7 +16,6 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/rest"
-	"github.com/fr-str/log"
 )
 
 func parseTime(s string) (time.Duration, error) {
@@ -122,7 +122,7 @@ func (d *DBot) handleSound(ctx context.Context, e *events.ApplicationCommandInte
 	if hasAtt {
 		opts.Link = att.URL
 	}
-	log.Debug("handleSounds", log.JSON(opts))
+	slog.Debug("handleSounds", slog.Any("opts", opts))
 
 	err := e.CreateMessage(discord.MessageCreate{
 		Content: fmt.Sprintf("Saving sound '%s'", opts.Link),
@@ -183,7 +183,7 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 		return err
 	}
 
-	log.Trace("handleToMP4", log.String("url", url))
+	slog.Debug("handleToMP4", slog.String("url", url))
 
 	info, err := d.DownloadVideoSmall(ctx, url)
 	if err != nil {
@@ -200,7 +200,7 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 	defer f.Close()
 
 	stat, err := f.Stat()
-	log.Trace("handleToMP4", log.String("file", f.Name()), log.Int("size_KB", int(stat.Size()>>10)))
+	slog.Debug("handleToMP4", slog.String("file", f.Name()), slog.Int("size_KB", int(stat.Size()>>10)))
 	if err != nil {
 		return fmt.Errorf("failed getting file size: %w", err)
 	}
@@ -217,7 +217,7 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 			msg := "converting to GIF..."
 			d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{Content: &msg})
 
-			log.Info("converting to GIF")
+			slog.Info("converting to GIF")
 
 			f, err = ffmpeg.ToDiscordGIF(ctx, info.Filepath, clip)
 			if err != nil {
@@ -345,7 +345,7 @@ func (d *DBot) playPlaylistFromDB(ctx context.Context, e *events.ApplicationComm
 func (d *DBot) autocompleteForPlayPlaylist(e *events.AutocompleteInteractionCreate) error {
 	names, err := d.Store.PlaylistNames(d.Ctx, e.GuildID().String())
 	if err != nil {
-		log.Error("failed getting playlist names", log.Err(err))
+		slog.Error("failed getting playlist names", slog.Any("error", err))
 	}
 
 	choices := make([]discord.AutocompleteChoice, 0, len(names))

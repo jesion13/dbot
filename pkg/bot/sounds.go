@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"log/slog"
 	"math/big"
 	"strconv"
 	"strings"
@@ -11,7 +12,6 @@ import (
 
 	"dbot/pkg/store"
 
-	"github.com/fr-str/log"
 	fuzzy "github.com/paul-mannino/go-fuzzywuzzy"
 )
 
@@ -30,7 +30,7 @@ func (srq *soundsRandQ) refresh(db *store.Queries, gid string) {
 	}
 	sounds, err := db.SelectSounds(context.Background(), gid)
 	if err != nil {
-		log.Error("db select failed: %w", err)
+		slog.Error("db select failed", slog.Any("error", err))
 	}
 	srq.s[gid] = sounds
 }
@@ -49,7 +49,7 @@ func (srq *soundsRandQ) rand(db *store.Queries, gid string) store.Sound {
 	sounds := srq.s[gid]
 	randInt, _ := rand.Int(rand.Reader, big.NewInt(int64(len(sounds))))
 
-	log.Trace("soundsRandQ.rand", log.Any("srq.s[gid]", len(srq.s[gid])), log.Any("randInt", randInt))
+	slog.Debug("soundsRandQ.rand", slog.Any("srq.s[gid]", len(srq.s[gid])), slog.Any("randInt", randInt))
 	v := sounds[randInt.Int64()]
 
 	sounds[randInt.Int64()] = sounds[len(sounds)-1]
@@ -86,7 +86,7 @@ func findSound(db *store.Queries, name string, gid string) ([]store.Sound, error
 
 	sounds, err := db.SelectSounds(context.Background(), gid)
 	if err != nil {
-		log.Error("db select failed: %w", err)
+		slog.Error("db select failed", slog.Any("error", err))
 	}
 	var fullSound store.Sound
 	var fullRatio int
@@ -96,7 +96,7 @@ func findSound(db *store.Queries, name string, gid string) ([]store.Sound, error
 			lev := fuzzy.EditDistance(alias,name)
 			ratio += lev
 			if ratio > 80 && ratio > fullRatio {
-				log.Debug("ratio fuzzy match", log.Int("ratio", ratio), log.String("alias", alias))
+				slog.Debug("ratio fuzzy match", slog.Int("ratio", ratio), slog.String("alias", alias))
 				fullRatio = ratio
 				fullSound = sound
 			}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/signal"
 	"time"
@@ -10,6 +11,7 @@ import (
 	dbot "dbot/pkg/bot"
 	"dbot/pkg/config"
 	"dbot/pkg/db"
+	"dbot/pkg/logger"
 	"dbot/pkg/store"
 	"dbot/pkg/ytdlp"
 
@@ -23,6 +25,7 @@ import (
 
 func main() {
 	config.Load()
+	slog.SetDefault(logger.New(os.Stdout, logger.ParseLevel(config.LOG_LEVEL)))
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	ytdlp.StartUpdater(ctx)
@@ -37,6 +40,10 @@ func main() {
 
 func bot(ctx context.Context, db *store.Queries) {
 	client, err := disgo.New(config.TOKEN,
+		disgobot.WithLogger(slog.Default()),
+		disgobot.WithEventManagerConfigOpts(
+			disgobot.WithAsyncEventsEnabled(),
+		),
 		disgobot.WithGatewayConfigOpts(
 			gateway.WithIntents(gateway.IntentsNonPrivileged, gateway.IntentMessageContent),
 		),

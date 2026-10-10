@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,7 +17,6 @@ import (
 
 	"dbot/pkg/config"
 
-	"github.com/fr-str/log"
 	"golang.org/x/net/html"
 )
 
@@ -106,7 +106,7 @@ func (YTDLP) DownloadAudio(link string) (VideoMeta, error) {
 	cmd.Stderr = stderr
 
 	var meta VideoMeta
-	log.Trace("DownloadAudio", log.String("cmd", cmd.String()), log.String("link", link))
+	slog.Debug("DownloadAudio", slog.String("cmd", cmd.String()), slog.String("link", link))
 	err = cmd.Run()
 	if err != nil {
 		b, _ := io.ReadAll(stderr)
@@ -141,7 +141,7 @@ func (YTDLP) DownloadVideo(ctx context.Context, link string) (VideoMeta, error) 
 	cmd.Stderr = stderr
 
 	var meta VideoMeta
-	log.Trace("DownloadVideo", log.String("cmd", cmd.String()), log.String("link", link))
+	slog.Debug("DownloadVideo", slog.String("cmd", cmd.String()), slog.String("link", link))
 	err = cmd.Run()
 	if err != nil {
 		b, _ := io.ReadAll(stderr)
@@ -176,7 +176,7 @@ func (YTDLP) DownloadVideoSmall(ctx context.Context, link string) (VideoMeta, er
 	cmd.Stderr = stderr
 
 	var meta VideoMeta
-	log.Trace("DownloadVideo", log.String("cmd", cmd.String()), log.String("link", link))
+	slog.Debug("DownloadVideo", slog.String("cmd", cmd.String()), slog.String("link", link))
 	err = cmd.Run()
 	if err != nil {
 		b, _ := io.ReadAll(stderr)
@@ -213,7 +213,7 @@ func (YTDLP) PlaylistInfo(link string) (PlaylistMeta, error) {
 	cmd.Stderr = stderr
 
 	var meta PlaylistMeta
-	log.Trace("PlaylistInfo", log.String("cmd", cmd.String()), log.String("link", link))
+	slog.Debug("PlaylistInfo", slog.String("cmd", cmd.String()), slog.String("link", link))
 	err := cmd.Run()
 	if err != nil {
 		b, _ := io.ReadAll(stderr)

@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -10,7 +11,6 @@ import (
 
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/snowflake/v2"
-	"github.com/fr-str/log"
 )
 
 func StartServer(d *dbot.DBot) {
@@ -18,14 +18,14 @@ func StartServer(d *dbot.DBot) {
 		links := make(map[string]string)
 		err := json.NewDecoder(r.Body).Decode(&links)
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 			return
 		}
 		if len(links) == 0 {
-			log.Error("no links")
+			slog.Error("no links")
 			return
 		}
-		log.Trace("links", log.JSON(links))
+		slog.Debug("links", slog.Any("links", links))
 
 		var msg strings.Builder
 		msg.WriteString("New	links:\n")
@@ -35,7 +35,7 @@ func StartServer(d *dbot.DBot) {
 
 		_, err = d.Client.Rest.CreateMessage(snowflake.MustParse("983810486627876924"), discord.MessageCreate{Content: msg.String()})
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -56,7 +56,7 @@ func StartServer(d *dbot.DBot) {
 				if ch.Type() != discord.ChannelTypeGuildText {
 					continue
 				}
-				log.Trace("[dupa]", log.Any("ch.Name", ch.Name()))
+				slog.Debug("[dupa]", slog.Any("ch.Name", ch.Name()))
 				var lastID snowflake.ID
 				for {
 					msgs, err := d.Client.Rest.GetMessages(ch.ID(), 0, lastID, 0, 100)
@@ -78,14 +78,14 @@ func StartServer(d *dbot.DBot) {
 					}
 				}
 			}
-			log.Info("DONE")
+			slog.Info("DONE")
 		}()
 	})
 	go func() {
-		log.Info("starting server: http://localhost:58008")
+		slog.Info("starting server: http://localhost:58008")
 		err := http.ListenAndServe(":58008", nil)
 		if err != nil {
-			log.Error(err.Error())
+			slog.Error(err.Error())
 		}
 	}()
 }

@@ -8,7 +8,7 @@ import (
 
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/snowflake/v2"
-	"github.com/fr-str/log"
+	"log/slog"
 )
 
 func (d *DBot) interfaceLoop() {
@@ -39,13 +39,13 @@ func (d *DBot) interfaceLoop() {
 			chID := snowflake.MustParse(c.Chid)
 			err = d.Client.Rest.DeleteMessage(chID, lastID)
 			if err != nil {
-				log.Error("failed deleting last message", log.Err(err), log.String("err_type", fmt.Sprintf("%T", err)))
+				slog.Error("failed deleting last message", slog.Any("error", err), slog.String("err_type", fmt.Sprintf("%T", err)))
 			}
 
 			lastContent = content
 			msg, err := d.Client.Rest.CreateMessage(chID, discord.MessageCreate{Content: content})
 			if err != nil {
-				log.Error("failed sending message", log.Err(err), log.String("err_type", fmt.Sprintf("%T", err)))
+				slog.Error("failed sending message", slog.Any("error", err), slog.String("err_type", fmt.Sprintf("%T", err)))
 				continue
 			}
 			lastID = msg.ID

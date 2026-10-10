@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"strings"
@@ -24,7 +25,6 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/snowflake/v2"
-	"github.com/fr-str/log"
 )
 
 type DBot struct {
@@ -104,13 +104,13 @@ func Start(ctx context.Context, client *bot.Client, dbstore *store.Queries) *DBo
 
 	go func() {
 		for Err := range d.MusicPlayer.ErrChan {
-			log.Error(Err.Err.Error())
+			slog.Error(Err.Err.Error())
 			ch, err := d.Store.GetChannel(ctx, store.GetChannelParams{
 				Gid:  Err.GID,
 				Type: musicChannel,
 			})
 			if err != nil {
-				log.Error(err.Error())
+				slog.Error(err.Error())
 				continue
 			}
 
@@ -119,7 +119,7 @@ func Start(ctx context.Context, client *bot.Client, dbstore *store.Queries) *DBo
 				Gid:  ch.Gid,
 				Type: errorChannel,
 			})
-			log.Trace("errChan", log.JSON(errChan), log.Err(err))
+			slog.Debug("errChan", slog.Any("errChan", errChan), slog.Any("error", err))
 			if err == nil && errChan.Chid != "" && errChan.Chid != "0" {
 				chID = errChan.Chid
 			}
@@ -134,7 +134,7 @@ func Start(ctx context.Context, client *bot.Client, dbstore *store.Queries) *DBo
 
 			_, err = d.Client.Rest.CreateMessage(snowflake.MustParse(chID), discord.MessageCreate{Content: msg})
 			if err != nil {
-				log.Error(err.Error())
+				slog.Error(err.Error())
 				continue
 			}
 
@@ -167,7 +167,7 @@ func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 
 	d.MusicPlayer.VC = vc
 	d.MusicPlayer.VCID = *vs.ChannelID
-	log.Trace("[dupa]", log.Any("channel.ChannelID", *vs.ChannelID))
+	slog.Debug("[dupa]", slog.Any("channel.ChannelID", *vs.ChannelID))
 
 	return nil
 }
@@ -186,7 +186,7 @@ type SaveSoundParams struct {
 
 func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
 	params.Aliases = normalize(params.Aliases)
-	log.Trace("SaveSound", log.Any("params.Link", params.Link))
+	slog.Debug("SaveSound", slog.Any("params.Link", params.Link))
 
 	aliases := strings.Split(params.Aliases, ",")
 
@@ -196,7 +196,7 @@ func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
 	}
 
 	name := fmt.Sprintf("%s.mp4", aliases[0])
-	log.Trace("SaveSound", log.Any("link", name))
+	slog.Debug("SaveSound", slog.Any("link", name))
 	file, err := d.backupFile(BackupFileParams{
 		Name:        name,
 		GID:         params.GID,
@@ -217,7 +217,7 @@ func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
 	if err != nil {
 		return err
 	}
-	log.Trace("SaveSound", log.JSON(sound))
+	slog.Debug("SaveSound", slog.Any("sound", sound))
 
 	srq.dropAndLoad(d.Store, sound.Gid)
 
@@ -249,7 +249,7 @@ func (d *DBot) downloadAsMP4(ctx context.Context, url string) (MP4File, error) {
 }
 
 func (d *DBot) Ready(e *events.Ready) {
-	log.Info("ready")
+	slog.Info("ready")
 }
 
 // returns users VoiceState if user is connected to one
@@ -284,7 +284,7 @@ func (d *DBot) wypierdalajZVC() error {
 
 func isValidUrl(s string) bool {
 	u, err := url.Parse(s)
-	log.Trace("isValidUrl", log.JSON(u))
+	slog.Debug("isValidUrl", slog.Any("u", u))
 	return err == nil && u.Host != ""
 }
 
@@ -312,7 +312,7 @@ func (d *DBot) play(gID, uID string, url string) error {
 		if err != nil {
 			go saveVideoInDir(d, url, gID, "play_history")
 		} else {
-			log.Trace("playHistory: artefact already exists")
+			slog.Debug("playHistory: artefact already exists")
 			url = art.Path
 		}
 
@@ -323,7 +323,7 @@ func (d *DBot) play(gID, uID string, url string) error {
 }
 
 func saveVideoInDir(d *DBot, url string, gID string, dir string) {
-	log.Trace("saveInPlayHistory", log.String("url", url), log.String("gid", gID))
+	slog.Debug("saveInPlayHistory", slog.String("url", url), slog.String("gid", gID))
 	meta := BackupFileParams{
 		OriginUrl:   url,
 		GID:         gID,
@@ -334,7 +334,7 @@ func saveVideoInDir(d *DBot, url string, gID string, dir string) {
 
 	jsonMeta, err := json.Marshal(meta)
 	if err != nil {
-		log.Error("lol dupa", log.Err(err), log.String("meta", fmt.Sprintf("%+v", meta)))
+		slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
 		return
 	}
 
@@ -343,7 +343,7 @@ func saveVideoInDir(d *DBot, url string, gID string, dir string) {
 		JobType: BackupJob,
 	})
 	if err != nil {
-		log.Error("lol dupa", log.Err(err), log.String("meta", fmt.Sprintf("%+v", meta)))
+		slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
 	}
 }
 
@@ -359,13 +359,13 @@ func (d *DBot) playFromYTPlaylist(url string,gID string) error {
 		return fmt.Errorf("failed getting playlist info: %w", err)
 	}
 
-	log.Trace("adding tracks from playlist", log.Int("len", len(info.Entries)))
+	slog.Debug("adding tracks from playlist", slog.Int("len", len(info.Entries)))
 	for i := range info.Entries {
 		if info.Entries[i].Duration == nil {
-			log.Trace(
+			slog.Debug(
 				"skipping due to null duration, probably deleted vid",
-				log.String("title", info.Entries[i].Title),
-				log.String("url", info.Entries[i].URL),
+				slog.String("title", info.Entries[i].Title),
+				slog.String("url", info.Entries[i].URL),
 			)
 			continue
 		}
@@ -405,10 +405,10 @@ func (d *DBot) savePlaylistFromYT(name, url, gID string) error {
 
 	for i := range info.Entries {
 		if info.Entries[i].Duration == nil {
-			log.Trace(
+			slog.Debug(
 				"skipping due to null duration, probably deleted vid",
-				log.String("title", info.Entries[i].Title),
-				log.String("url", info.Entries[i].URL),
+				slog.String("title", info.Entries[i].Title),
+				slog.String("url", info.Entries[i].URL),
 			)
 			continue
 		}
@@ -423,7 +423,7 @@ func (d *DBot) savePlaylistFromYT(name, url, gID string) error {
 
 		b, err := json.Marshal(meta)
 		if err != nil {
-			log.Error("lol dupa", log.Err(err), log.String("meta", fmt.Sprintf("%+v", meta)))
+			slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
 			continue
 		}
 
@@ -434,7 +434,7 @@ func (d *DBot) savePlaylistFromYT(name, url, gID string) error {
 			JobType:   DownloadJob,
 		})
 		if err != nil {
-			log.Error("lol dupa", log.Err(err), log.String("meta", fmt.Sprintf("%+v", meta)))
+			slog.Error("lol dupa", slog.Any("error", err), slog.String("meta", fmt.Sprintf("%+v", meta)))
 			continue
 		}
 	}
