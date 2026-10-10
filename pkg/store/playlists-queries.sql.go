@@ -185,6 +185,29 @@ func (q *Queries) SearchPlaylists(ctx context.Context, arg SearchPlaylistsParams
 	return items, nil
 }
 
+const softDeletePlaylist = `-- name: SoftDeletePlaylist :execrows
+UPDATE playlists
+SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE id = ?1
+  AND guild_id = ?2
+  AND deleted_at IS NULL
+`
+
+type SoftDeletePlaylistParams struct {
+	ID      int64
+	GuildID string
+}
+
+// soft delete: the row stays so the (guild_id, youtube_playlist_id) identity survives
+// and a later re-discovery reactivates it instead of creating a duplicate.
+func (q *Queries) SoftDeletePlaylist(ctx context.Context, arg SoftDeletePlaylistParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, softDeletePlaylist, arg.ID, arg.GuildID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const touchPlaylistSync = `-- name: TouchPlaylistSync :exec
 UPDATE playlists
 SET last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')

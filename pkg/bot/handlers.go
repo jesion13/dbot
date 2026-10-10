@@ -72,16 +72,37 @@ func truncate(s string) string {
 	return s
 }
 
-// answerDeferred replaces the deferred "thinking" response with the final message.
-// The original /play and /playlist replies were public, so the deferral is public too.
+// answerDeferred finalizes an acknowledged interaction: it first edits the deferred
+// "thinking" response and falls back to a follow-up message. It always returns
+// ErrInteractionAnswered, because the interaction is consumed either way and a second
+// initial response would be rejected by discord.
 func (d *DBot) answerDeferred(e *events.ApplicationCommandInteractionCreate, content string) error {
+	return deliverDeferred(content,
+		func(c string) error {
+			_, err := d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{Content: &c})
+			return err
+		},
+		func(c string) error {
+			_, err := d.Client.Rest.CreateFollowupMessage(d.Client.ApplicationID, e.Token(), discord.MessageCreate{Content: c})
+			return err
+		})
+}
+
+// deliverDeferred writes the final message, trying the deferred response first and a
+// follow-up message second. It never sends another initial interaction response.
+// edit and followup are injected so every delivery path is testable without discord.
+func deliverDeferred(content string, edit, followup func(string) error) error {
 	content = truncate(content)
-	if _, err := d.Client.Rest.UpdateInteractionResponse(d.Client.ApplicationID, e.Token(), discord.MessageUpdate{
-		Content: &content,
-	}); err != nil {
-		// the interaction stays consumed - do not let the caller fall back to an initial
-		// response, discord would reject it
-		slog.Error("failed editing deferred response", slog.Any("error", err))
+
+	err := edit(content)
+	if err == nil {
+		return ErrInteractionAnswered
+	}
+	slog.Error("failed editing deferred response", slog.Any("error", err))
+
+	if err := followup(content); err != nil {
+		// a follow-up can be rejected too (expired token); nothing left to try
+		slog.Error("failed sending deferred follow-up", slog.Any("error", err))
 	}
 	return ErrInteractionAnswered
 }
@@ -199,6 +220,51 @@ func playlistQueuedMsg(res queueResult) string {
 		msg += fmt.Sprintf(", %d unavailable", res.unavailable)
 	}
 	return msg
+}
+
+// ErrNotAuthorized is returned when a guild-administrator command is invoked by
+// someone who is not one, or outside a guild.
+var ErrNotAuthorized = errors.New("you need to be a server administrator")
+
+// isGuildAdmin re-checks the permission at runtime. Command registration is only a
+// UI hint, so it can never be what authorizes the mutation.
+func isGuildAdmin(e *events.ApplicationCommandInteractionCreate) bool {
+	if e.GuildID() == nil {
+		return false
+	}
+	member := e.Member()
+	if member == nil {
+		return false
+	}
+	return member.Permissions.Has(discord.PermissionAdministrator)
+}
+
+func (d *DBot) handlePlaylistDelete(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	// defer first: the handler always looks the playlist up before answering
+	if err := e.DeferCreateMessage(true); err != nil {
+		return err
+	}
+
+	if !isGuildAdmin(e) {
+		return d.answerDeferred(e, ErrNotAuthorized.Error())
+	}
+
+	id, err := strconv.ParseInt(e.SlashCommandInteractionData().String("name"), 10, 64)
+	if err != nil {
+		return d.answerDeferred(e, "unknown playlist")
+	}
+
+	title, err := d.deletePlaylist(ctx, id, e.GuildID().String())
+	if err != nil {
+		if errors.Is(err, ErrPlaylistNotFound) || errors.Is(err, sql.ErrNoRows) {
+			// covers "does not exist", "another guild" and "already deleted" without
+			// telling the caller which
+			return d.answerDeferred(e, "playlist not found")
+		}
+		return d.answerDeferred(e, "could not delete playlist")
+	}
+
+	return d.answerDeferred(e, fmt.Sprintf("Deleted playlist %q. Cached videos were kept.", title))
 }
 
 func (d *DBot) handleWypierdalaj(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {

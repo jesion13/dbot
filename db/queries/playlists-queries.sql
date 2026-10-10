@@ -47,3 +47,12 @@ ORDER BY position ASC;
 UPDATE playlists
 SET last_synced_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
 WHERE id = :id;
+
+-- soft delete: the row stays so the (guild_id, youtube_playlist_id) identity survives
+-- and a later re-discovery reactivates it instead of creating a duplicate.
+-- name: SoftDeletePlaylist :execrows
+UPDATE playlists
+SET deleted_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+WHERE id = :id
+  AND guild_id = :guild_id
+  AND deleted_at IS NULL;

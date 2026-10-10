@@ -229,6 +229,38 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 	return links, res, nil
 }
 
+// deletePlaylist soft-deletes a playlist and drops its entries in one transaction.
+//
+// It only touches the store DB: cached media lives in the backup DB and is shared, so
+// artefacts and files survive. The row itself stays so re-discovering the same
+// youtube playlist reactivates it instead of creating a duplicate.
+func (d *DBot) deletePlaylist(ctx context.Context, playlistID int64, guildID string) (title string, err error) {
+	// resolve first so we can report the name, and so another guild's id is a no-op
+	pl, err := d.Store.GetPlaylist(ctx, store.GetPlaylistParams{ID: playlistID, GuildID: guildID})
+	if err != nil {
+		return "", err
+	}
+
+	err = d.StoreDB.WithTx(ctx, func(q *store.Queries) error {
+		res, err := q.SoftDeletePlaylist(ctx, store.SoftDeletePlaylistParams{ID: playlistID, GuildID: guildID})
+		if err != nil {
+			return fmt.Errorf("soft delete playlist: %w", err)
+		}
+		if res == 0 {
+			// deleted between the lookup and the update
+			return ErrPlaylistNotFound
+		}
+		if err := q.DeletePlaylistEntries(ctx, playlistID); err != nil {
+			return fmt.Errorf("delete playlist entries: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return pl.Title, nil
+}
+
 // queueSnapshot appends a whole saved snapshot to the existing queue, in stored order.
 func (d *DBot) queueSnapshot(ctx context.Context, gid string, playlistID int64) (queueResult, error) {
 	entries, err := d.Store.ListPlaylistEntries(ctx, playlistID)

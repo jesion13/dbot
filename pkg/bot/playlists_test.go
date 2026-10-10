@@ -622,6 +622,9 @@ func bumpQueueFailCount(t *testing.T, tb *testBot, videoURL string, n int64) {
 	require.NotZero(t, affected)
 }
 
+// Realistic yt-dlp stderr fragments. Only a confirmed cause is permanent: a generic
+// "Video unavailable" also covers region blocks, temporary privacy and broken
+// cookies, and parking those would block recovery forever.
 func TestIsUnavailableVideo(t *testing.T) {
 	tests := []struct {
 		name string
@@ -629,15 +632,50 @@ func TestIsUnavailableVideo(t *testing.T) {
 		want bool
 	}{
 		{"nil", nil, false},
-		{"unavailable", errors.New("backupFile: 'u': yt-dlp: failed to download\nERROR: [youtube] x: Video unavailable\n"), true},
-		{"private", errors.New("ERROR: [youtube] x: Private video. Sign in"), true},
-		{"tos removal", errors.New("ERROR: [youtube] x: This video has been removed for violating YouTube's Terms of Service"), true},
-		{"deleted", errors.New("ERROR: [youtube] x: This video is no longer available because the account has been terminated"), true},
-		// a cookie/config problem, not deleted media: must stay retryable
-		{"age gated", errors.New("ERROR: [youtube] x: Sign in to confirm your age"), false},
-		{"sign in required", errors.New("ERROR: [youtube] x: Sign in to confirm you are not a bot"), false},
-		{"transient", errors.New("ERROR: unable to download webpage"), false},
+		{
+			"tos strike",
+			errors.New("backupFile: 'u': yt-dlp: failed to download\nERROR: [youtube] x: This video has been removed for violating YouTube's Terms of Service\n"),
+			true,
+		},
+		{
+			"removed by uploader",
+			errors.New("ERROR: [youtube] x: This video has been removed by the uploader"),
+			true,
+		},
+		{
+			"terminated account",
+			errors.New("ERROR: [youtube] x: This video is no longer available because the account associated with this video has been terminated."),
+			true,
+		},
+		// everything below must stay retryable
+		{"generic unavailable", errors.New("ERROR: [youtube] x: Video unavailable"), false},
+		{
+			"private",
+			errors.New("ERROR: [youtube] x: Private video. Sign in if you've been granted access"),
+			false,
+		},
+		{
+			"region block",
+			errors.New("ERROR: [youtube] x: The uploader has not made this video available in your country"),
+			false,
+		},
+		{
+			"sign in required",
+			errors.New("ERROR: [youtube] x: Sign in to confirm you’re not a bot"),
+			false,
+		},
+		{
+			"age confirmation",
+			errors.New("ERROR: [youtube] x: Sign in to confirm your age. This video may be inappropriate for some users."),
+			false,
+		},
+		{
+			"transient network",
+			errors.New("ERROR: unable to download webpage: <urlopen error timed out>"),
+			false,
+		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, isUnavailableVideo(tt.err))

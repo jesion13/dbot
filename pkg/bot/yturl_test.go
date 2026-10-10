@@ -84,8 +84,15 @@ func TestParseYTLinkPlaylistForms(t *testing.T) {
 
 	// v= still wins when the path is /playlist
 	link, ok := parseYTLink("https://www.youtube.com/playlist?list=PL1&v=abc")
-	if ok {
-		assert.False(t, link.Playlist, "a url with a video id is a single-video request")
-		assert.Equal(t, "abc", link.VideoID)
-	}
+	require.True(t, ok, "a url carrying a video id must still parse")
+	assert.False(t, link.Playlist, "a url with a video id is a single-video request")
+	assert.Equal(t, "abc", link.VideoID)
+	assert.Equal(t, "PL1", link.PlaylistID)
+
+	// the same rule for the plain watch route
+	link, ok = parseYTLink("https://www.youtube.com/watch?v=abc&list=PL1")
+	require.True(t, ok, "a watch url carrying a video id must parse as a video")
+	assert.False(t, link.Playlist, "v= takes precedence over list=")
+	assert.Equal(t, "abc", link.VideoID)
+	assert.Equal(t, "PL1", link.PlaylistID)
 }

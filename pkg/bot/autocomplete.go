@@ -15,7 +15,9 @@ import (
 // playlistAutocomplete suggests saved playlists for the focused `name` option.
 // The option value is the internal playlist id, never the title: titles collide.
 func (d *DBot) playlistAutocomplete(e *events.AutocompleteInteractionCreate) {
-	if e.Data.CommandName != "playlist" {
+	switch e.Data.CommandName {
+	case "playlist", "playlist-delete":
+	default:
 		return
 	}
 

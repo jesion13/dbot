@@ -15,23 +15,28 @@ import (
 
 const BackupJob = "backup"
 
-// isUnavailableVideo reports a yt-dlp failure that will not fix itself on retry.
-// shortcut: matching yt-dlp's stderr text; if upstream rewords it we just fall back to
-// retrying like before, which is noisy but not wrong.
+// isUnavailableVideo reports a yt-dlp failure that retrying cannot fix.
 //
-// Sign-in / age / cookie errors are deliberately NOT matched: those are configuration
-// problems, so a retry with working cookies would succeed. They stay retryable and burn
-// the ordinary three attempts instead of being parked as unavailable forever.
+// Only messages with a confirmed cause qualify. Anything generic - "Video
+// unavailable", "Private video", a region block, a sign-in or age prompt - stays
+// retryable: those can be temporary, cookie/config related, or resolved by a later
+// attempt, and parking them as unavailable would block recovery forever.
+//
+// shortcut: matching yt-dlp's stderr text; if upstream rewords a message we fall back
+// to retrying, which is noisy but not wrong.
 func isUnavailableVideo(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
+	s := strings.ToLower(err.Error())
+	// confirmed, specific causes only - never a bare "has been removed"
 	for _, msg := range []string{
-		"Video unavailable",   // deleted / private / region blocked
-		"Private video",       // not public
-		"has been removed",    // TOS strike / removed by uploader
-		"no longer available", // terminated account
+		"removed for violating youtube's terms of service", // tos strike
+		"removed for violating our terms of service",
+		"has been removed by the uploader",
+		"was removed by the uploader",
+		"account associated with this video has been terminated",
+		"this video is no longer available because the account",
 	} {
 		if strings.Contains(s, msg) {
 			return true

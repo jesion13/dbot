@@ -6,6 +6,7 @@ import (
 
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/omit"
 )
 
 // descryptions are requeired by Discord
@@ -40,6 +41,20 @@ var cmds = []discord.ApplicationCommandCreate{
 				Required:    false,
 			},
 		},
+	},
+	discord.SlashCommandCreate{
+		Name:        "playlist-delete",
+		Description: "delete a saved playlist (cached videos are kept)",
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionString{
+				Name:         "name",
+				Description:  "playlist",
+				Required:     true,
+				Autocomplete: true,
+			},
+		},
+		// hides the command from non-admins in the client, but the handler re-checks
+		DefaultMemberPermissions: omit.NewPtr(discord.PermissionAdministrator),
 	},
 	discord.SlashCommandCreate{
 		Name:        "pause-play",
@@ -146,6 +161,7 @@ func (d *DBot) CommandHandlers() map[string]cmdHandler {
 	return map[string]cmdHandler{
 		"play":            d.handlePlay,
 		"playlist":        d.handlePlaylist,
+		"playlist-delete": d.handlePlaylistDelete,
 		"wypierdalaj":     d.handleWypierdalaj,
 		"set-bot-channel": d.handleMapChannel,
 		"pause-play":      d.handlePause,
