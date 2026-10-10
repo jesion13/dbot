@@ -2,8 +2,10 @@ package player
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -226,7 +228,7 @@ func (p *Player) playV2(audio *Audio) error {
 		"-c:a", "libopus",
 		"-frame_duration", "20",
 		"-vbr", "off",
-		"-b:a", "64k",
+		"-b:a", opusBitrate,
 		"-application", "audio",
 		"-packet_loss", "0",
 		"-f", "opus",
@@ -262,6 +264,7 @@ func (p *Player) playV2(audio *Audio) error {
 	p.VC.SetSpeaking(ctx, voice.SpeakingFlagMicrophone)
 	defer p.VC.SetSpeaking(ctx, voice.SpeakingFlagNone)
 	var pacer framePacer
+frames:
 	for {
 		page, _, err := reader.ParseNextPage()
 		if err != nil {
@@ -277,7 +280,15 @@ func (p *Player) playV2(audio *Audio) error {
 			_, err := p.VC.UDP().Write(frame)
 			p.Unlock()
 			if err != nil {
-				slog.Error("failed to write opus frame", slog.Any("error", err))
+				if errors.Is(err, net.ErrClosed) {
+					// the voice conn is gone (ctrl+c). keep going and the shutdown buries
+					// itself in hundreds of identical errors
+					slog.Error("failed to write opus frame", slog.Any("error", err))
+					break frames
+				}
+				// anything else is a transient datagram error - aborting the whole track
+				// over one bad packet plays as silence
+				slog.Warn("dropped opus frame", slog.Any("error", err))
 			}
 		}
 	}
@@ -295,6 +306,9 @@ func (p *Player) playV2(audio *Audio) error {
 // to a lossy encoder. 10dB is ffmpeg's default and leaves quiet material quiet.
 // const dynaudnorm = `dynaudnorm=f=150:g=15:p=0.95:m=10.0`
 
+// 128k measured fine offline (single 20ms frames, 320B) but sounded broken in
+// discord; 64k is what shipped before. Change one knob at a time.
+const opusBitrate = "64k"
 
 func (p *Player) playSound(audio *Audio) error {
 	p.Playing.Store(true)
@@ -309,7 +323,7 @@ func (p *Player) playSound(audio *Audio) error {
 		"-frame_duration", "20",
 		// "-af", dynaudnorm,
 		"-vbr", "off",
-		"-b:a", "64k",
+		"-b:a", opusBitrate,
 		"-application", "audio",
 		"-packet_loss", "0",
 		"-f", "opus",
