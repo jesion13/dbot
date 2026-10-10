@@ -1,5 +1,6 @@
 services:
   dbot:
+    image: ${DBOT_IMAGE:-dbot:master}
     restart: unless-stopped
     build:
       context: .
