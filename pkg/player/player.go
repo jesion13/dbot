@@ -51,34 +51,64 @@ var (
 	errConnGone = errors.New("player: voice connection is closed")
 )
 
-// framePacer paces opus frame sends to real-time (20ms/frame), matching
-// disgo's own voice.AudioSender timing. We can't use AudioSender/
-// SetOpusFrameProvider directly: it assumes exclusive ownership of the
-// Conn, but music and sounds are two independent producers that both write
-// to the same Conn (a sound can interrupt a song mid-stream) - handing
-// ownership to a second provider silently abandons the first one, which
-// is why using it caused the song to never resume after a sound played.
+// framePacer used to be per-producer mutable state, which two overlapping music
+// generations could touch at once. Pacing is now a single clock owned by the
+// player: lastFrameSent lives under mu and is advanced only when a frame is really
+// written, so a generation that loses the output never reserves pacing time and
+// cannot disturb its replacement. The sleep itself happens outside mu.
 //
-// A pacer belongs to exactly one producer goroutine and is never touched under
-// the player lock: the sleep has to stay outside it.
-type framePacer struct {
-	lastFrameSent int64
+// The clock keeps opus frame sends at real time (20ms/frame), matching disgo's own
+// voice.AudioSender timing. We can't use AudioSender/SetOpusFrameProvider directly:
+// it assumes exclusive ownership of the Conn, but music and sounds are two
+// independent producers that both write to the same Conn (a sound can interrupt a
+// song mid-stream) - handing ownership to a second provider silently abandons the
+// first one, which is why using it caused the song to never resume after a sound
+// played.
+const frameInterval = voice.OpusFrameSizeMs * time.Millisecond
+
+// frameDelayLocked is how long the caller must wait before the next frame, so
+// frames stay ~20ms apart no matter which producer is sending.
+func (p *Player) frameDelayLocked(now int64) time.Duration {
+	if p.lastFrameSent == 0 {
+		return 0
+	}
+	d := frameInterval - time.Duration(now-p.lastFrameSent)*time.Millisecond
+	if d < 0 {
+		return 0
+	}
+	return d
 }
 
-func (fp *framePacer) wait() {
-	if fp.lastFrameSent == 0 {
-		fp.lastFrameSent = time.Now().UnixMilli()
+// commitFrameLocked advances the pacing clock after a frame actually went out. A
+// long gap (a sound, a pause) resets the clock instead of catching up, so
+// playback never bursts to make up for time it lost.
+func (p *Player) commitFrameLocked(now int64) {
+	ms := int64(frameInterval / time.Millisecond)
+	if p.lastFrameSent != 0 && now < p.lastFrameSent+3*ms {
+		p.lastFrameSent += ms
 		return
 	}
+	p.lastFrameSent = now
+}
 
-	sleepTime := time.Duration(int64(voice.OpusFrameSizeMs) - (time.Now().UnixMilli() - fp.lastFrameSent))
-	if sleepTime > 0 {
-		time.Sleep(sleepTime * time.Millisecond)
+// sleepCtx waits for d, or returns early if the context is done. A pacing sleep
+// must never outlive the generation that started it.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
 	}
-	if time.Now().UnixMilli() < fp.lastFrameSent+int64(voice.OpusFrameSizeMs)*3 {
-		fp.lastFrameSent += int64(voice.OpusFrameSizeMs)
-	} else {
-		fp.lastFrameSent = time.Now().UnixMilli()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -129,10 +159,19 @@ type Player struct {
 	vcid snowflake.ID
 
 	// output ownership, only touched under mu
-	speaking     bool
-	speakingConn voice.Conn
-	musicPacer   framePacer
-	soundPacer   framePacer
+	// lastFrameSent is the shared pacing clock: the unix milli of the last frame
+	// that actually went out. See the pacing comment above.
+	lastFrameSent int64
+	// speakingApplied is the flag state discord has confirmed. It is recorded only
+	// after SetSpeaking succeeds, so a failure is retried instead of cached.
+	speakingApplied bool
+	speakingConn    voice.Conn
+	speakWarned     bool
+
+	// shutdown: the first Close caller coordinates, everyone else waits on
+	// closeDone for that same shutdown to finish.
+	closeDone chan struct{}
+	closeErr  error
 
 	// soundQ is the FIFO of accepted sound requests. soundSignal wakes the sound
 	// worker without ever blocking the enqueuing goroutine.
@@ -143,6 +182,9 @@ type Player struct {
 	// ffmpeg/yt-dlp and a real connection.
 	playTrackFn func(context.Context, uint64, Track) error
 	playSoundFn func(context.Context, SoundTrack) error
+	// paceFn is the pacing wait. It is a seam so a test can hold a frame inside the
+	// pacing window, which is where generations used to overlap.
+	paceFn func(context.Context, time.Duration) error
 }
 
 func NewPlayer() *Player {
@@ -150,12 +192,14 @@ func NewPlayer() *Player {
 	p := &Player{
 		ErrChan:     make(chan Err, errBuf),
 		soundSignal: make(chan struct{}, 1),
+		closeDone:   make(chan struct{}),
 		baseCtx:     ctx,
 		baseCancel:  cancel,
 	}
 	p.gate = sync.NewCond(&p.mu)
 	p.playTrackFn = p.playTrack
 	p.playSoundFn = p.playSound
+	p.paceFn = sleepCtx
 
 	// registered before it can be waited on
 	p.wg.Add(1)
@@ -166,18 +210,31 @@ func NewPlayer() *Player {
 	return p
 }
 
-// Close stops every worker, joins them, and releases the output. It is idempotent,
-// accepts no further work, and never touches cached or backed-up media: those files
-// are shared between guilds, playlists and sounds.
+// Close stops every worker, joins them, and releases the output. It never touches
+// cached or backed-up media: those files are shared between guilds, playlists and
+// sounds.
+//
+// Exactly one caller performs the shutdown; every other caller - concurrent or
+// later - waits for that same shutdown to finish before returning. That matters
+// because the caller owns the voice connection: a second Close returning early
+// would let it close a connection that live workers are still writing to.
 //
 // The voice connection is left open, because the workers that were writing to it
-// have stopped by the time Close returns. The caller owns closing it.
+// have stopped by the time Close returns.
 func (p *Player) Close() error {
 	p.mu.Lock()
 	if p.closed {
+		// somebody else is already shutting down: wait for their shutdown, not just
+		// for the flag to be set
+		done := p.closeDone
 		p.mu.Unlock()
-		return nil
+		<-done
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.closeErr
 	}
+
+	// this caller owns the shutdown from here on
 	p.closed = true
 	p.abortLocked()
 	p.queue = nil
@@ -194,24 +251,42 @@ func (p *Player) Close() error {
 	p.baseCancel()
 	p.wg.Wait()
 
+	// the connection is still ours to talk to, so release the speaking flag here
 	p.mu.Lock()
 	if conn != nil {
 		p.setSpeakingLocked(conn, false)
 	}
 	p.mu.Unlock()
 
-	// every sender was a worker, and all of them have exited
+	// every sender was a worker and all of them have exited, so this is the only
+	// close and nothing can send on it afterwards
 	close(p.ErrChan)
+
+	p.mu.Lock()
+	p.closeErr = nil
+	p.mu.Unlock()
+	close(p.closeDone)
 	return nil
 }
 
-// SetVC installs the voice connection the player writes to. Workers pick the new
-// connection up on their next frame; nothing is closed here.
-func (p *Player) SetVC(conn voice.Conn, vcid snowflake.ID) {
+// SetVC installs the voice connection the player writes to.
+//
+// Contract: one player uses one connection for its whole lifetime. SetVC is meant
+// for a player that is not streaming yet - a worker captures the connection when
+// its track starts and keeps it for that track, so changing the field mid-playback
+// would not move it. Reconnecting therefore goes through replacing the player (see
+// the bot's lifecycle operation), which stops the workers first.
+//
+// After Close it is refused: a shut-down player owns no output.
+func (p *Player) SetVC(conn voice.Conn, vcid snowflake.ID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		return ErrClosed
+	}
 	p.conn = conn
 	p.vcid = vcid
+	return nil
 }
 
 // Conn returns a consistent snapshot of the connection and its channel. A non-nil
@@ -489,58 +564,76 @@ func (p *Player) soundEligibleLocked(ctx context.Context) bool {
 	return !p.closed && ctx.Err() == nil
 }
 
-// awaitMusicWrite blocks until this generation owns the output, and reports false
-// once it has lost it for good (replaced generation, cancelled context, close).
-func (p *Player) awaitMusicWrite(gen uint64, ctx context.Context) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for !p.musicEligibleLocked(gen, ctx) {
-		if p.closed || gen != p.gen || ctx.Err() != nil {
-			return false
+// streamAliveLocked reports whether this stream is still the authoritative one. It
+// separates the two reasons a write cannot happen right now:
+//
+//	not alive  -> the generation was replaced, the context was cancelled or the
+//	              player shut down: the frame is gone for good, drop it;
+//	alive but  -> a pause or a sound is in the way: the frame is only temporarily
+//	not eligible  blocked and must be preserved and retried.
+func (p *Player) streamAliveLocked(gen uint64, ctx context.Context) bool {
+	return !p.closed && gen == p.gen && ctx.Err() == nil
+}
+
+// submitFrame paces and writes one frame.
+//
+// It loops rather than dropping the frame, because losing it means losing audio:
+// a sound or a pause that lands between decoding and writing parks this loop on the
+// gate and retries the very same frame when the output becomes eligible again. The
+// pacing sleep is cancelled with the context, and the pacing clock is only advanced
+// after a frame really went out, so an obsolete generation never reserves a slot.
+func (p *Player) submitFrame(ctx context.Context, conn voice.Conn, frame []byte, gen uint64, music bool) error {
+	for {
+		p.mu.Lock()
+		eligible := p.frameEligibleLocked(gen, ctx, music)
+		var delay time.Duration
+		if eligible {
+			delay = p.frameDelayLocked(time.Now().UnixMilli())
 		}
-		p.gate.Wait()
-	}
-	return true
-}
-
-// awaitSoundWrite is the sound equivalent: sounds are not suspended by music, they
-// only stop when the player goes away.
-func (p *Player) awaitSoundWrite(ctx context.Context) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for !p.soundEligibleLocked(ctx) {
-		if p.closed || ctx.Err() != nil {
-			return false
+		if !eligible {
+			if !p.streamAliveLocked(gen, ctx) {
+				p.mu.Unlock()
+				return errOutputLost
+			}
+			// parked, not spinning: Wait releases mu and returns with it held
+			p.gate.Wait()
+			p.mu.Unlock()
+			continue
 		}
-		p.gate.Wait()
+		p.mu.Unlock()
+
+		if err := p.paceFn(ctx, delay); err != nil {
+			return err
+		}
+
+		p.mu.Lock()
+		if !p.frameEligibleLocked(gen, ctx, music) {
+			// the state moved under us during the pacing sleep; decide again whether
+			// this frame is still worth keeping
+			if !p.streamAliveLocked(gen, ctx) {
+				p.mu.Unlock()
+				return errOutputLost
+			}
+			p.gate.Wait()
+			p.mu.Unlock()
+			continue
+		}
+		// eligibility and the write are one critical section, and only a frame that
+		// really goes out advances the pacing clock
+		p.commitFrameLocked(time.Now().UnixMilli())
+		err := p.writeFrameLocked(conn, frame)
+		p.mu.Unlock()
+		return err
 	}
-	return true
 }
 
-// submitMusicFrame paces, re-checks eligibility and writes one music frame. The
-// check and the write share the lock, so no state change can slip between them.
-// errOutputLost means the frame was dropped and the caller should await again.
-func (p *Player) submitMusicFrame(gen uint64, ctx context.Context, conn voice.Conn, frame []byte) error {
-	p.musicPacer.wait()
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.musicEligibleLocked(gen, ctx) {
-		return errOutputLost
+// frameEligibleLocked is the single gate for both producers. music additionally
+// depends on its generation; sounds only depend on the player still being alive.
+func (p *Player) frameEligibleLocked(gen uint64, ctx context.Context, music bool) bool {
+	if music {
+		return p.musicEligibleLocked(gen, ctx)
 	}
-	return p.writeFrameLocked(conn, frame)
-}
-
-// submitSoundFrame is submitMusicFrame for sounds.
-func (p *Player) submitSoundFrame(ctx context.Context, conn voice.Conn, frame []byte) error {
-	p.soundPacer.wait()
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !p.soundEligibleLocked(ctx) {
-		return errOutputLost
-	}
-	return p.writeFrameLocked(conn, frame)
+	return p.soundEligibleLocked(ctx)
 }
 
 // writeFrameLocked is the only place a frame reaches the voice connection, and the
@@ -574,18 +667,18 @@ func (p *Player) outputActiveLocked() bool {
 	return p.current != nil && !p.paused
 }
 
-// setSpeakingLocked changes discord's speaking flag, once per transition. A stale
-// worker computing this from current state can never switch it off for the stream
-// that took over from it.
+// setSpeakingLocked reconciles discord's speaking flag with what the output is
+// doing. Two properties matter:
+//
+//   - the cached state records only what discord confirmed, so a failed call is
+//     retried on the next reconcile instead of being remembered as applied;
+//   - the desired state is derived from current player state, so a stale worker
+//     computing it can never switch the flag off for the stream that took over.
+//
+// Callers must hold mu, which also keeps two workers from racing the same flag.
 func (p *Player) setSpeakingLocked(conn voice.Conn, on bool) {
-	if conn != p.speakingConn {
-		// a new connection has no known flag state of ours
-		p.speakingConn = conn
-		p.speaking = on
-	} else if p.speaking == on {
+	if conn == p.speakingConn && p.speakingApplied == on {
 		return
-	} else {
-		p.speaking = on
 	}
 
 	flags := voice.SpeakingFlags(0)
@@ -594,9 +687,19 @@ func (p *Player) setSpeakingLocked(conn voice.Conn, on bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), speakingTimeout)
 	defer cancel()
+
 	if err := conn.SetSpeaking(ctx, flags); err != nil {
-		slog.Warn("failed setting speaking", slog.Bool("speaking", on), slog.Any("error", err))
+		// a dead connection fails every time; warn once instead of on every frame
+		if !p.speakWarned {
+			p.speakWarned = true
+			slog.Warn("failed setting speaking, will retry", slog.Bool("speaking", on), slog.Any("error", err))
+		}
+		return
 	}
+
+	p.speakingConn = conn
+	p.speakingApplied = on
+	p.speakWarned = false
 }
 
 // --- audio pipelines --------------------------------------------------------
@@ -638,31 +741,14 @@ func (p *Player) streamFrames(ctx context.Context, conn voice.Conn, gen uint64, 
 		}
 
 		for _, frame := range frames {
-			var submitErr error
-			if music {
-				if !p.awaitMusicWrite(gen, ctx) {
-					// distinguish "cancelled" from "replaced": the caller decides whether
-					// a lost output is worth reporting
-					if err := ctx.Err(); err != nil {
-						return err
-					}
-					return errOutputLost
-				}
-				submitErr = p.submitMusicFrame(gen, ctx, conn, frame)
-			} else {
-				if !p.awaitSoundWrite(ctx) {
-					if err := ctx.Err(); err != nil {
-						return err
-					}
-					return errOutputLost
-				}
-				submitErr = p.submitSoundFrame(ctx, conn, frame)
-			}
+			submitErr := p.submitFrame(ctx, conn, frame, gen, music)
 
 			switch {
-			case errors.Is(submitErr, errOutputLost):
-				// the state changed while we were pacing; re-await on the next frame
-				continue
+			case errors.Is(submitErr, errOutputLost), errors.Is(submitErr, context.Canceled):
+				// this generation lost the output: the frame is dropped and the stream
+				// ends. A frame held back by a pause or a sound never gets here - it is
+				// retried inside submitFrame.
+				return submitErr
 			case errors.Is(submitErr, net.ErrClosed):
 				// the connection is gone: stop the whole stream, not just this page
 				slog.Error("voice connection closed, stopping stream", slog.Any("error", submitErr))

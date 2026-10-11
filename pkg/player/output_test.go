@@ -36,6 +36,7 @@ type fakeUDP struct {
 	rec    *[]recordedWrite
 	closed *atomicBool
 	conn   *fakeConn
+	times  *[]time.Time
 	// failNext makes the next Write return this error instead of recording, so a
 	// test can inject one bad datagram. Guarded by mu.
 	failNext bool
@@ -56,6 +57,9 @@ func (u fakeUDP) Write(b []byte) (int, error) {
 	cp := make([]byte, len(b))
 	copy(cp, b)
 	*u.rec = append(*u.rec, recordedWrite{frame: cp})
+	if u.times != nil {
+		*u.times = append(*u.times, time.Now())
+	}
 	// park here if the test asked for it: the player holds its lock across this
 	// call, which is exactly the ordering the test wants to observe
 	block, writing, release := u.conn.blockWrite, u.conn.writing, u.conn.release
@@ -104,11 +108,15 @@ type fakeConn struct {
 
 	gid snowflake.ID
 
-	mu       sync.Mutex
-	writes   []recordedWrite
-	speaking []voice.SpeakingFlags
-	udp      *fakeUDP
-	closed   atomicBool
+	mu            sync.Mutex
+	writes        []recordedWrite
+	frameTimes    []time.Time
+	speaking      []voice.SpeakingFlags
+	speakAttempts int
+	speakFail     int
+	speakFailures int
+	udp           *fakeUDP
+	closed        atomicBool
 
 	// blockWrite parks every write until the returned release func is called, so a
 	// test can hold a frame inside the sink while the player state changes.
@@ -120,7 +128,7 @@ type fakeConn struct {
 func newFakeConn(gid snowflake.ID) *fakeConn {
 	c := &fakeConn{gid: gid}
 	c.closed = atomicBool{mu: &c.mu}
-	c.udp = &fakeUDP{mu: &c.mu, rec: &c.writes, closed: &c.closed, conn: c}
+	c.udp = &fakeUDP{mu: &c.mu, rec: &c.writes, closed: &c.closed, conn: c, times: &c.frameTimes}
 	c.Conn = &connStub{udp: c.udp, c: c}
 	return c
 }
@@ -164,9 +172,35 @@ func (s *connStub) UDP() voice.UDPConn { return s.udp }
 
 func (s *connStub) SetSpeaking(_ context.Context, flags voice.SpeakingFlags) error {
 	s.c.mu.Lock()
+	defer s.c.mu.Unlock()
+	s.c.speakAttempts++
+	if s.c.speakFail > 0 {
+		s.c.speakFail--
+		s.c.speakFailures++
+		return errors.New("speaking rejected")
+	}
 	s.c.speaking = append(s.c.speaking, flags)
-	s.c.mu.Unlock()
 	return nil
+}
+
+// failSpeaking makes the next n SetSpeaking calls fail, so a test can check that a
+// failure is retried instead of being cached as applied.
+func (c *fakeConn) failSpeaking(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.speakFail = n
+}
+
+func (c *fakeConn) speakingFailures() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.speakFailures
+}
+
+func (c *fakeConn) speakingAttempts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.speakAttempts
 }
 
 // close marks the connection unusable, so every later write is net.ErrClosed.
@@ -220,7 +254,7 @@ func newOutputFixture(t *testing.T) *outputFixture {
 	t.Helper()
 	p := NewPlayer()
 	conn := newFakeConn(1234)
-	p.SetVC(conn, 99)
+	require.NoError(t, p.SetVC(conn, 99))
 	// the real pipelines would shell out to ffmpeg and yt-dlp; these tests drive
 	// streamFrames directly instead, so no track worker may start on its own
 	p.playTrackFn = func(ctx context.Context, gen uint64, tr Track) error {
@@ -283,14 +317,66 @@ func (s *stream) stop() error {
 	return s.exit()
 }
 
+// hookPacing parks the next frame inside the pacing sleep, before any lock is
+// taken. That is the window in which two overlapping generations used to share
+// the pacing clock. release() lets the wait finish.
+//
+// The hook stays installed for the rest of the test: swapping it out would race the
+// streams that are reading it, which is a race in the test, not in the player.
+func (f *outputFixture) hookPacing() (parked chan struct{}, release func()) {
+	return f.hookPacingFor(1)
+}
+
+// hookPacingFor parks the next n frames inside the pacing sleep and only lets them
+// through once all n have arrived. Two streams released together then race each
+// other for the rest of their pacing path, which is where a shared pacing clock
+// used to be corrupted.
+func (f *outputFixture) hookPacingFor(n int) (parked chan struct{}, release func()) {
+	parked = make(chan struct{}, 8)
+	releaseCh := make(chan struct{})
+	var mu sync.Mutex
+	var arrived int
+	f.paceFn = func(ctx context.Context, d time.Duration) error {
+		mu.Lock()
+		arrived++
+		enough := arrived >= n
+		mu.Unlock()
+		select {
+		case parked <- struct{}{}:
+		default:
+		}
+		if !enough {
+			select {
+			case <-releaseCh:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		select {
+		case <-releaseCh:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		return nil
+	}
+	return parked, func() { close(releaseCh) }
+}
+
 // runMusic starts a real music stream on the player's current generation, writing
 // frames with the given payload so the test can tell it from other streams.
 func (f *outputFixture) runMusic(payload string) *stream {
 	f.t.Helper()
+	return f.runMusicOn(f.currentGen(), payload)
+}
+
+// runMusicOn starts a stream pinned to a specific generation, which is how a test
+// drives an obsolete generation.
+func (f *outputFixture) runMusicOn(gen uint64, payload string) *stream {
+	f.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &stream{f: f, cancel: cancel, done: make(chan error, 1)}
 	go func() {
-		s.done <- f.streamFrames(ctx, f.conn, f.currentGen(), true, endlessPages([]byte(payload)))
+		s.done <- f.streamFrames(ctx, f.conn, gen, true, endlessPages([]byte(payload)))
 	}()
 	return s
 }
@@ -314,6 +400,51 @@ func (f *outputFixture) countFrames(payload string) int {
 	return n
 }
 
+// frameTimeOf is when the nth frame with the given payload was written.
+func (f *outputFixture) frameTimeOf(payload string, n int) time.Time {
+	f.t.Helper()
+	f.conn.mu.Lock()
+	defer f.conn.mu.Unlock()
+	var seen int
+	for i, w := range f.conn.writes {
+		if string(w.frame) != payload {
+			continue
+		}
+		if seen == n {
+			return f.conn.frameTimes[i]
+		}
+		seen++
+	}
+	f.t.Fatalf("no frame %d with payload %q", n, payload)
+	return time.Time{}
+}
+
+// lastFrameSentAt reads the shared pacing clock.
+func (f *outputFixture) lastFrameSentAt() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastFrameSent
+}
+
+// releaseSoundsNow drains the sound queue the way the sound worker does, so a test
+// can end a suspension without ffmpeg.
+func (f *outputFixture) releaseSoundsNow() error {
+	f.mu.Lock()
+	f.soundQ = nil
+	f.soundActive = false
+	f.gate.Broadcast()
+	f.mu.Unlock()
+	return nil
+}
+
+// reconcileSpeaking re-derives the speaking flag from current state, which is what
+// the player does after any state change.
+func (f *outputFixture) reconcileSpeaking() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshOutputLocked()
+}
+
 // awaitFrames waits until at least n frames with the given payload were written.
 func (f *outputFixture) awaitFrames(payload string, n int) {
 	f.t.Helper()
@@ -322,14 +453,24 @@ func (f *outputFixture) awaitFrames(payload string, n int) {
 	})
 }
 
-// unpace makes the next frame from each producer go out immediately, so a test need
-// not wait 20ms for the first frame. Call it before starting any stream: a pacer
-// belongs to one producer goroutine, so touching it while a stream runs would be a
-// race in the test rather than in the player.
+// unpace makes the next frame go out immediately, so a test need not wait 20ms.
+// It resets the shared pacing clock, so call it before starting a stream.
 func (f *outputFixture) unpace() {
-	now := time.Now().UnixMilli()
-	f.musicPacer.lastFrameSent = now
-	f.soundPacer.lastFrameSent = now
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lastFrameSent = time.Now().UnixMilli()
+}
+
+// runSingleFrame starts a stream that yields exactly one frame and then ends, so a
+// test can assert that this frame - and only this frame - survived a suspension.
+func (f *outputFixture) runSingleFrame(gen uint64, payload string) *stream {
+	f.t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &stream{f: f, cancel: cancel, done: make(chan error, 1)}
+	go func() {
+		s.done <- f.streamFrames(ctx, f.conn, gen, true, pages([]byte(payload)))
+	}()
+	return s
 }
 
 // runSound starts a sound stream the same way, with its own context.
@@ -402,10 +543,10 @@ func TestStaleGenerationCannotWrite(t *testing.T) {
 	f.gen = newGen
 	f.mu.Unlock()
 
-	err := f.submitMusicFrame(oldGen, context.Background(), f.conn, []byte("stale"))
+	err := f.submitFrame(context.Background(), f.conn, []byte("stale"), oldGen, true)
 	assert.ErrorIs(t, err, errOutputLost, "the replaced generation is refused")
 
-	err = f.submitMusicFrame(newGen, context.Background(), f.conn, []byte("fresh"))
+	err = f.submitFrame(context.Background(), f.conn, []byte("fresh"), newGen, true)
 	require.NoError(t, err)
 
 	assert.Empty(t, f.countFrames("stale"), "the stale generation wrote nothing")
@@ -551,7 +692,7 @@ func TestStaleWorkerCannotDisableNewerOwnerSpeaking(t *testing.T) {
 	assert.ErrorIs(t, s.exit(), errOutputLost)
 	assert.Equal(t, offs, f.conn.countSpeakingOff(), "a stale worker never turns speaking off")
 
-	require.NoError(t, f.submitMusicFrame(gen+1, context.Background(), f.conn, []byte("fresh")))
+	require.NoError(t, f.submitFrame(context.Background(), f.conn, []byte("fresh"), gen+1, true))
 	assert.True(t, f.conn.speakingIsOn(), "the new owner keeps speaking on")
 }
 

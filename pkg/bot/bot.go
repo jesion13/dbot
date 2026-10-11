@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"dbot/pkg/backup"
@@ -39,14 +40,32 @@ type DBot struct {
 	ytdlp.YTDLP
 	// PlaylistInfoFunc fetches playlist metadata; nil means use yt-dlp.
 	PlaylistInfoFunc func(link string) (ytdlp.PlaylistMeta, error)
-	// MusicPlayer is for plaing stuff from YT and others. It is replaced when the
-	// bot leaves a voice channel, so every read goes through Player() under mu.
+	// MusicPlayer is for plaing stuff from YT and others.
+	//
+	// playerMu guards the pointer only: it makes reads cheap and safe. It is never
+	// held across a Close, which can take a while.
 	playerMu    sync.RWMutex
 	MusicPlayer *player.Player
-	// playerErrs is the single reporting stream. It outlives every player
-	// instance: a replaced player's errors are forwarded into it, so a swap can
-	// never silence error reporting.
+	// voiceMu serializes whole voice transitions. Two disconnect events arriving at
+	// once would otherwise both shut down the same player, close its connection and
+	// install two replacements, orphaning one of them with its workers running.
+	voiceMu sync.Mutex
+	// playerErrs is the single reporting stream. It belongs to the bot and outlives
+	// every player instance: a replaced player's errors are forwarded into it, so a
+	// swap can never silence error reporting. Players never close it.
 	playerErrs chan player.Err
+	// playerForwarders counts live error forwarders, so a test can assert that
+	// retired players leave none behind.
+	playerForwarders atomic.Int32
+}
+
+// botCtx is never nil: tests build a DBot by hand, and selecting on a nil context
+// panics.
+func (d *DBot) botCtx() context.Context {
+	if d.Ctx == nil {
+		return context.Background()
+	}
+	return d.Ctx
 }
 
 // Player returns the active player. Safe against a concurrent replacement.
@@ -56,25 +75,75 @@ func (d *DBot) Player() *player.Player {
 	return d.MusicPlayer
 }
 
-// setPlayer swaps in a new player and starts forwarding its errors. The old player
-// is expected to have been closed already, which ends its forwarding.
+// SetPlayer installs p and starts forwarding its errors. This is the low-level
+// pointer setter; it does not tear anything down. Use ReplacePlayer for a real
+// transition so the whole sequence is serialized.
 func (d *DBot) SetPlayer(p *player.Player) {
 	d.playerMu.Lock()
 	d.MusicPlayer = p
 	d.playerMu.Unlock()
 
-	// a forwarder per player, and it exits when that player is closed (which closes
-	// ErrChan), so replacements do not accumulate goroutines
+	// One forwarder per player, and it exits when that player's ErrChan closes (the
+	// player closes it once its workers are gone) or when the bot shuts down, so
+	// replacements never accumulate goroutines.
+	d.playerForwarders.Add(1)
 	go func() {
-		for e := range p.ErrChan {
+		defer d.playerForwarders.Add(-1)
+		for {
 			select {
-			case d.playerErrs <- e:
-			case <-d.Ctx.Done():
+			case e, ok := <-p.ErrChan:
+				if !ok {
+					slog.Debug("player error forwarding stopped: player closed")
+					return
+				}
+				d.forwardPlayerErr(e)
+			case <-d.botCtx().Done():
+				slog.Debug("player error forwarding stopped: bot shutting down")
 				return
 			}
 		}
-		slog.Debug("player error forwarding stopped")
 	}()
+}
+
+// forwardPlayerErr hands one error to the reporting stream. The stream is bounded:
+// a full one drops the error with a log rather than blocking a playback worker
+// forever, because a stuck worker is worse than a lost message.
+func (d *DBot) forwardPlayerErr(e player.Err) {
+	if d.playerErrs == nil {
+		return
+	}
+	select {
+	case d.playerErrs <- e:
+	default:
+		slog.Error("player error stream full, dropping", slog.Any("error", e.Err))
+	}
+}
+
+// ReplacePlayer performs a whole voice transition under one lock: shut the current
+// player down, wait for it, close its connection only then, and install exactly one
+// replacement. Concurrent callers are serialized, so a second transition cannot
+// orphan the first one's replacement.
+func (d *DBot) ReplacePlayer() (*player.Player, error) {
+	d.voiceMu.Lock()
+	defer d.voiceMu.Unlock()
+
+	old := d.Player()
+	conn, _ := old.Conn()
+
+	// Close joins the workers that write to the connection, so it must finish first.
+	// playerMu is not held here on purpose.
+	var closeErr error
+	if err := old.Close(); err != nil {
+		closeErr = fmt.Errorf("close player: %w", err)
+		slog.Error("failed closing player", slog.Any("error", err))
+	}
+	if conn != nil {
+		conn.Close(d.botCtx())
+	}
+
+	next := player.NewPlayer()
+	d.SetPlayer(next)
+	return next, closeErr
 }
 
 // playlistInfo is the single place playlist metadata is fetched, so tests can stub it.
@@ -157,7 +226,7 @@ func Start(ctx context.Context, client *bot.Client, dbstore *db.Store) *DBot {
 // bot's single stream, not any one player's channel, so replacing the player does
 // not silence reporting.
 func (d *DBot) reportPlayerErrors(ctx context.Context) {
-	d.consumePlayerErrors(func(Err player.Err) {
+	d.consumePlayerErrors(ctx, func(Err player.Err) {
 		slog.Error(Err.Err.Error())
 		ch, err := d.Store.GetChannel(ctx, store.GetChannelParams{
 			Gid:  Err.GID,
@@ -193,11 +262,18 @@ func (d *DBot) reportPlayerErrors(ctx context.Context) {
 	})
 }
 
-// consumePlayerErrors drains the bot's error stream into handle. It is separate from
-// the posting so a test can drive the reporting loop without a store or a REST client.
-func (d *DBot) consumePlayerErrors(handle func(player.Err)) {
-	for Err := range d.playerErrs {
-		handle(Err)
+// consumePlayerErrors drains the bot's error stream into handle. It returns on
+// context cancellation: the stream belongs to the bot and is never closed, so a
+// bare range would block forever. It is separate from the posting so a test can
+// drive the reporting loop without a store or a REST client.
+func (d *DBot) consumePlayerErrors(ctx context.Context, handle func(player.Err)) {
+	for {
+		select {
+		case Err := <-d.playerErrs:
+			handle(Err)
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -223,7 +299,10 @@ func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 		return fmt.Errorf("failed to join VC: %w", err)
 	}
 
-	d.Player().SetVC(vc, *vs.ChannelID)
+	if err := d.Player().SetVC(vc, *vs.ChannelID); err != nil {
+		vc.Close(d.botCtx())
+		return fmt.Errorf("failed attaching voice connection: %w", err)
+	}
 	slog.Debug("[dupa]", slog.Any("channel.ChannelID", *vs.ChannelID))
 
 	return nil
@@ -330,19 +409,11 @@ func (d *DBot) mapChannel(params store.MapChannelParams) (store.Channel, error) 
 }
 
 // wypierdalajZVC tears down the current voice session and installs a fresh player.
-// Ordering matters: the player is closed first, because Close joins the workers
-// that write to the connection, and only then is that connection closed.
+// It is the only voice-replacement entry point, so every path (the command, the
+// voice-state listener, a reconnect) gets the same ordering and serialization.
 func (d *DBot) wypierdalajZVC() error {
-	old := d.Player()
-	if err := old.Close(); err != nil {
-		slog.Error("failed closing player", slog.Any("error", err))
-	}
-	if conn, _ := old.Conn(); conn != nil {
-		conn.Close(d.Ctx)
-	}
-
-	d.SetPlayer(player.NewPlayer())
-	return nil
+	_, err := d.ReplacePlayer()
+	return err
 }
 
 func isValidUrl(s string) bool {

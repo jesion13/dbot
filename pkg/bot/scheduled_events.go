@@ -85,6 +85,9 @@ func (d *DBot) findVoiceChannel() error {
 	if err != nil {
 		return err
 	}
-	d.Player().SetVC(vc, *channelID)
+	if err := d.Player().SetVC(vc, *channelID); err != nil {
+		vc.Close(d.botCtx())
+		return err
+	}
 	return nil
 }

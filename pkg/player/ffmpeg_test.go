@@ -29,7 +29,7 @@ func newPipelinePlayer(t *testing.T) (*Player, *fakeConn) {
 	t.Helper()
 	p := NewPlayer()
 	conn := newFakeConn(1234)
-	p.SetVC(conn, 99)
+	require.NoError(t, p.SetVC(conn, 99))
 	t.Cleanup(func() { _ = p.Close() })
 	return p, conn
 }

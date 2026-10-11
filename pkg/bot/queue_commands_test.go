@@ -296,7 +296,7 @@ func TestQueueCommandReplyGuards(t *testing.T) {
 			c.AddVoiceState(discord.VoiceState{GuildID: botGID, UserID: userID, ChannelID: userChan})
 		}
 		p := player.NewPlayer()
-		p.SetVC(stubConn{gid: botGID}, botVCID)
+		require.NoError(t, p.SetVC(stubConn{gid: botGID}, botVCID))
 		t.Cleanup(func() { _ = p.Close() })
 		d := &DBot{Client: &bot.Client{Caches: c}}
 		d.SetPlayer(p)
@@ -355,7 +355,7 @@ func TestQueueCommandsReachARealPlayer(t *testing.T) {
 	c.AddVoiceState(discord.VoiceState{GuildID: botGID, UserID: userID, ChannelID: &botVCID})
 
 	p := player.NewPlayer()
-	p.SetVC(stubConn{gid: botGID}, botVCID)
+	require.NoError(t, p.SetVC(stubConn{gid: botGID}, botVCID))
 	t.Cleanup(func() { _ = p.Close() })
 	d := &DBot{Client: &bot.Client{Caches: c}, Ctx: context.Background()}
 	d.SetPlayer(p)

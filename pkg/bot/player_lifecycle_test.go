@@ -10,8 +10,6 @@ import (
 
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/cache"
-	"github.com/disgoorg/disgo/voice"
-	"github.com/disgoorg/snowflake/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -38,7 +36,7 @@ func TestPlayerReplacementKeepsErrorReporting(t *testing.T) {
 
 	// this is the loop the bot actually runs, so the test covers what it reads
 	reported := make(chan player.Err, 4)
-	go d.consumePlayerErrors(func(e player.Err) { reported <- e })
+	go d.consumePlayerErrors(d.Ctx, func(e player.Err) { reported <- e })
 
 	// the replacement path: close the old player, install a new one
 	require.NoError(t, first.Close())
@@ -99,34 +97,13 @@ func TestConcurrentPlayerReadsAndReplacement(t *testing.T) {
 	}
 }
 
-// countingConn records how many times it was closed, and whether the player was
-// still alive when that happened - which is the ordering wypierdalajZVC must get
-// right: the player joins its workers before the connection is closed.
-type countingConn struct {
-	voice.Conn
-	closes       int
-	closedBefore int
-	alive        func() bool
-}
-
-func (c *countingConn) GuildID() snowflake.ID { return 1 }
-
-func (c *countingConn) SetSpeaking(context.Context, voice.SpeakingFlags) error { return nil }
-
-func (c *countingConn) Close(context.Context) {
-	c.closes++
-	if c.alive != nil && c.alive() {
-		c.closedBefore++
-	}
-}
-
 func TestWypierdalajClosesPlayerBeforeItsConnection(t *testing.T) {
 	d, p := newLifecycleBot(t)
 
 	conn := &countingConn{
 		alive: func() bool { return !p.QueueSnapshot().Closed },
 	}
-	p.SetVC(conn, 42)
+	require.NoError(t, p.SetVC(conn, 42))
 	require.NoError(t, d.wypierdalajZVC())
 
 	assert.Zero(t, conn.closedBefore, "the connection must not close while the player can still write to it")
