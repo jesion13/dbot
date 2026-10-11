@@ -977,3 +977,123 @@ func TestSamePositionViaDifferentRoutesHasTheSameSnapshot(t *testing.T) {
 	require.Equal(t, 3, b.CurrentIndex, "both routes land on the same position")
 	require.Equal(t, a, b, "same lineup, same order, same cursor after two different routes")
 }
+
+// --- SkipNextTracks ----------------------------------------------------------
+
+// The whole point of the method: both ends of the move come from one critical
+// section, so a caller reporting the skip can never name the wrong track because
+// playback advanced in between.
+func TestSkipNextTracksReportsBothEnds(t *testing.T) {
+	t.Run("normal advancement", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+
+		from, to, err := p.SkipNextTracks()
+		require.NoError(t, err)
+		requirePlaying(t, from, "a", "the track we left")
+		requirePlaying(t, to, "b", "the track we moved to")
+
+		awaitPlaying(t, p, "b")
+		assert.Equal(t, 2, playing(p), "playback really moved")
+	})
+
+	t.Run("wrapping off the end", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		awaitPlaying(t, p, "b")
+
+		from, to, err := p.SkipNextTracks()
+		require.NoError(t, err)
+		requirePlaying(t, from, "b", "the last track is the one left behind")
+		requirePlaying(t, to, "a", "and we wrap to position 1")
+		assert.Equal(t, 1, playing(p))
+	})
+
+	t.Run("idle player starts position 1", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		awaitPlaying(t, p, "b")
+		p.endTrack(2)
+		await(t, "idle at the end", func() bool { return playing(p) == 0 })
+
+		from, to, err := p.SkipNextTracks()
+		require.NoError(t, err)
+		assert.Nil(t, from, "nothing was playing, so nothing was skipped")
+		requirePlaying(t, to, "a", "an idle player starts over at position 1")
+
+		awaitPlaying(t, p, "a")
+		assert.Equal(t, 1, playing(p))
+	})
+
+	t.Run("empty lineup", func(t *testing.T) {
+		p := newFake(t)
+
+		from, to, err := p.SkipNextTracks()
+		require.ErrorIs(t, err, ErrNoNextTrack)
+		assert.Nil(t, from)
+		assert.Nil(t, to)
+	})
+
+	t.Run("closed player", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a")}))
+		awaitPlaying(t, p, "a")
+		require.NoError(t, p.Close())
+
+		_, _, err := p.SkipNextTracks()
+		require.ErrorIs(t, err, ErrClosed)
+	})
+}
+
+// The returned tracks must be copies: a caller holding one must not be able to reach
+// into the live lineup through it.
+func TestSkipNextTracksReturnsCopies(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+
+	from, to, err := p.SkipNextTracks()
+	require.NoError(t, err)
+
+	from.Title = "hacked"
+	to.Title = "hacked"
+
+	assert.Equal(t, "a", p.QueueSnapshot().Entry(1).Title)
+	assert.Equal(t, "b", p.QueueSnapshot().Entry(2).Title)
+}
+
+// SkipNext must stay a plain wrapper, so the two can never drift apart.
+func TestSkipNextMatchesSkipNextTracks(t *testing.T) {
+	t.Run("same transition", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+
+		from, to, err := p.SkipNextTracks()
+		require.NoError(t, err)
+		wrapper := p.QueueSnapshot()
+
+		assert.Equal(t, to.Title, wrapper.Entry(wrapper.CurrentIndex).Title,
+			"the wrapper leaves the cursor where the full method did")
+		assert.Equal(t, 2, playing(p))
+		assert.Equal(t, "a", from.Title)
+	})
+
+	t.Run("same errors", func(t *testing.T) {
+		p := newFake(t)
+		_, _, err := p.SkipNextTracks()
+		require.ErrorIs(t, err, ErrNoNextTrack)
+		require.ErrorIs(t, p.SkipNext(), ErrNoNextTrack, "both report the empty lineup the same way")
+	})
+}
+
+func requirePlaying(t *testing.T, got *Track, want, msg string) {
+	t.Helper()
+	require.NotNil(t, got, msg)
+	assert.Equal(t, want, got.Title, msg)
+}

@@ -21,7 +21,7 @@ const queueCmdPrefix = "!"
 const maxQueueMsgLen = 1900
 
 type queuePlayer interface {
-	SkipNext() error
+	SkipNextTracks() (from, to *player.Track, err error)
 	Previous() error
 	JumpTo(int) error
 	QueueSnapshot() player.QueueSnapshot
@@ -67,17 +67,17 @@ func parseQueueCommand(content string) (c queueCommand, ok bool, err error) {
 func runQueueCommand(c queueCommand, p queuePlayer) string {
 	switch c.action {
 	case "next":
-		// the reply names the track being left, so it has to be read before the move:
-		// afterwards the snapshot already points at the next one
-		was := p.QueueSnapshot().Current()
-		if err := p.SkipNext(); err != nil {
+		// the player returns both ends of the move under one lock; reading the lineup
+		// around SkipNext instead would race playback advancing on its own
+		from, to, err := p.SkipNextTracks()
+		if err != nil {
 			return queueErrText(err, "nothing to skip to")
 		}
-		if was == nil {
+		if from == nil {
 			// nothing was playing, so there is nothing that got skipped
-			return queueNowText(p.QueueSnapshot(), "started")
+			return trackText("started", to)
 		}
-		return fmt.Sprintf("skipped **%s**", displayTitle(was.Title))
+		return trackText("skipped", from)
 	case "prev":
 		if err := p.Previous(); err != nil {
 			return queueErrText(err, "nothing to go back to")
@@ -111,11 +111,14 @@ func queueErrText(err error, fallback string) string {
 }
 
 func queueNowText(s player.QueueSnapshot, verb string) string {
-	cur := s.Current()
-	if cur == nil {
+	return trackText(verb, s.Current())
+}
+
+func trackText(verb string, t *player.Track) string {
+	if t == nil {
 		return "the queue is finished"
 	}
-	return fmt.Sprintf("%s **%s**", verb, displayTitle(cur.Title))
+	return fmt.Sprintf("%s **%s**", verb, displayTitle(t.Title))
 }
 
 // Imported metadata carries newlines, tabs and space runs; rendered raw, one entry

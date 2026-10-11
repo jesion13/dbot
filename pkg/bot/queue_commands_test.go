@@ -30,9 +30,12 @@ type stubPlayer struct {
 	lastJump            int
 }
 
-func (s *stubPlayer) SkipNext() error {
+func (s *stubPlayer) SkipNextTracks() (*player.Track, *player.Track, error) {
 	s.skips++
-	return s.skipErr
+	if s.skipErr != nil {
+		return nil, nil, s.skipErr
+	}
+	return s.snap.Current(), nil, nil
 }
 
 func (s *stubPlayer) Previous() error {
@@ -371,12 +374,21 @@ func (s stubConn) SetSpeaking(context.Context, voice.SpeakingFlags) error { retu
 // against the track it was supposed to name rather than a frozen snapshot.
 type advancingPlayer struct {
 	tracks []player.Track
-	cursor int
+	cursor int // -1 when idle, like the real player
 }
 
-func (a *advancingPlayer) SkipNext() error {
+func (a *advancingPlayer) SkipNextTracks() (*player.Track, *player.Track, error) {
+	if len(a.tracks) == 0 {
+		return nil, nil, player.ErrNoNextTrack
+	}
+	var from *player.Track
+	if a.cursor >= 0 {
+		f := a.tracks[a.cursor]
+		from = &f
+	}
 	a.cursor = (a.cursor + 1) % len(a.tracks)
-	return nil
+	t := a.tracks[a.cursor]
+	return from, &t, nil
 }
 
 func (a *advancingPlayer) Previous() error {
@@ -399,10 +411,51 @@ func (a *advancingPlayer) QueueSnapshot() player.QueueSnapshot {
 	return player.QueueSnapshot{Tracks: a.tracks, CurrentIndex: a.cursor + 1}
 }
 
+// starts playing at position 1, like a player that has just been handed a lineup
 func lineup3() *advancingPlayer {
 	return &advancingPlayer{
 		tracks: []player.Track{{Title: "first"}, {Title: "second"}, {Title: "third"}},
 	}
+}
+
+// nothing playing, but tracks are queued - the state after a lineup played out
+func idleLineup3() *advancingPlayer {
+	p := lineup3()
+	p.cursor = -1
+	return p
+}
+
+// An idle player is restarting, not skipping, and must say so.
+func TestSkipFromIdleReportsAStart(t *testing.T) {
+	p := idleLineup3()
+
+	got := runQueueCommand(queueCommand{action: "next"}, p)
+
+	assert.Equal(t, "started **first**", got, "nothing was playing, so nothing was skipped")
+}
+
+// An empty lineup has nothing to wrap to; the error path must survive the new method.
+func TestSkipOnEmptyLineupReportsTheError(t *testing.T) {
+	p := &advancingPlayer{}
+
+	got := runQueueCommand(queueCommand{action: "next"}, p)
+
+	assert.Equal(t, "the queue is empty", got)
+}
+
+// The double must hand back what the real player does, or these tests prove nothing.
+func TestSkipUsesBothEndsOfTheMove(t *testing.T) {
+	p := lineup3()
+	p.cursor = 1
+
+	from, to, err := p.SkipNextTracks()
+
+	require.NoError(t, err)
+	require.NotNil(t, from)
+	require.NotNil(t, to)
+	assert.Equal(t, "second", from.Title, "the track we left")
+	assert.Equal(t, "third", to.Title, "the track we moved to")
+	assert.Equal(t, 2, p.cursor)
 }
 
 // The reply has to name the track that was skipped, not the one that started playing.

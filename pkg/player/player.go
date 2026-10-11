@@ -318,18 +318,36 @@ func (p *Player) EnqueueMany(tracks []Track) error {
 // SkipNext moves to the next absolute position, wrapping from the last entry back to
 // position 1. Nothing is ever removed: the entry it leaves stays at its own position.
 func (p *Player) SkipNext() error {
+	_, _, err := p.SkipNextTracks()
+	return err
+}
+
+// SkipNextTracks is SkipNext plus the two tracks involved, captured under the same
+// lock as the cursor move. A caller that wants to report what it did must not read
+// the lineup separately around SkipNext: playback can advance on its own in between,
+// and it would then report the wrong track. From is nil when the player was idle, so
+// nothing was actually skipped.
+func (p *Player) SkipNextTracks() (from, to *Track, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return ErrClosed
+		return nil, nil, ErrClosed
 	}
 	if len(p.lineup) == 0 {
-		return ErrNoNextTrack
+		return nil, nil, ErrNoNextTrack
+	}
+
+	if p.cursor >= 0 && p.cursor < len(p.lineup) {
+		f := *p.lineup[p.cursor]
+		from = &f
 	}
 	// deliberately different from a track finishing on its own, which stops
 	p.cursor = (p.cursor + 1) % len(p.lineup)
+	d := *p.lineup[p.cursor]
+	to = &d
+
 	p.startLocked()
-	return nil
+	return from, to, nil
 }
 
 // Idle at the end of a lineup resumes from the last entry. Entries are never removed,
