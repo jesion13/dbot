@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"strings"
 )
 
 const countQueueByJobType = `-- name: CountQueueByJobType :one
@@ -123,6 +124,61 @@ func (q *Queries) LatestJob(ctx context.Context, arg LatestJobParams) (Queue, er
 		&i.LastMsg,
 	)
 	return i, err
+}
+
+const latestJobsByMeta = `-- name: LatestJobsByMeta :many
+SELECT id, fail_count, status, job_type, meta, last_msg FROM queue
+WHERE job_type = ? AND meta IN (/*SLICE:metas*/?)
+ORDER BY id ASC
+`
+
+type LatestJobsByMetaParams struct {
+	JobType string
+	Metas   []string
+}
+
+// The batch form of LatestJob, so a whole playlist resolves in one query instead of
+// one per entry. Callers must keep the last row per meta: the ordering is the same as
+// LatestJob's, so the newest row for a meta comes last.
+func (q *Queries) LatestJobsByMeta(ctx context.Context, arg LatestJobsByMetaParams) ([]Queue, error) {
+	query := latestJobsByMeta
+	var queryParams []interface{}
+	queryParams = append(queryParams, arg.JobType)
+	if len(arg.Metas) > 0 {
+		for _, v := range arg.Metas {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:metas*/?", strings.Repeat(",?", len(arg.Metas))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:metas*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Queue
+	for rows.Next() {
+		var i Queue
+		if err := rows.Scan(
+			&i.ID,
+			&i.FailCount,
+			&i.Status,
+			&i.JobType,
+			&i.Meta,
+			&i.LastMsg,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const nextInQueue = `-- name: NextInQueue :one

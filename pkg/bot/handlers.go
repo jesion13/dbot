@@ -240,7 +240,17 @@ func (d *DBot) handleWypierdalaj(ctx context.Context, e *events.ApplicationComma
 	return nil
 }
 
+// Remapping the music or error channel redirects what the bot plays into and where it
+// reports failures, so it is admin-only. Command registration is only a UI hint, so the
+// handler re-checks.
 func (d *DBot) handleMapChannel(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	if !isGuildAdmin(e) {
+		return e.CreateMessage(discord.MessageCreate{
+			Content: errNotAuthorized,
+			Flags:   discord.MessageFlagEphemeral,
+		})
+	}
+
 	data := e.SlashCommandInteractionData()
 	channel := data.Channel("channel")
 

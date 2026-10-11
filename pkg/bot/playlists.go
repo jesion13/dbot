@@ -173,34 +173,65 @@ func (r queueResult) total() int {
 	return r.cached + r.waiting + r.unscheduled + r.unavailable
 }
 
+// Every entry is resolved from two queries in total, not two per entry: a 500 track
+// playlist was 1000 sequential lookups on a connection capped at one.
 func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.PlaylistEntry) (tracks []player.Track, res queueResult, err error) {
+	// a local copy wins over any job history, so collect the urls a job could exist for
+	// before deciding anything
+	urls := make([]string, 0, len(entries))
+	for _, e := range entries {
+		urls = append(urls, canonicalEntryURL(e))
+	}
+
+	byURL, err := d.cachedVideoBatch(ctx, entries)
+	if err != nil {
+		return nil, res, err
+	}
+	latest, err := d.latestBackupJobs(ctx, gid, videoBackupDir, urls)
+	if err != nil {
+		return nil, res, err
+	}
+
 	for _, e := range entries {
 		videoID := e.YoutubeVideoID.String
 		url := e.YoutubeUrl
 
 		// a local copy wins over any job history
-		path, found, err := d.cachedVideo(ctx, videoID, url)
-		if err != nil {
-			return nil, res, fmt.Errorf("lookup '%s': %w", url, err)
-		}
+		path, found := cachedPathFor(byURL, videoID, url)
 		if found {
-
 			tracks = append(tracks, player.Track{Title: e.Title, URL: url, Filepath: artefactFile(path)})
 			res.queued++
 			res.cached++
 			continue
 		}
 
-		if videoID != "" {
-			url = canonicalVideoURL(videoID)
-		}
+		url = canonicalEntryURL(e)
 		if url == "" {
-
 			res.unavailable++
 			continue
 		}
 
-		state, err := d.scheduleBackup(ctx, gid, videoBackupDir, url)
+		row, hasRow := latest[url]
+		var latestPtr *store.Queue
+		if hasRow {
+			latestPtr = &row
+		}
+		state, enqueue := backupStateFor(latestPtr)
+		if enqueue {
+			meta, err := backupJobMeta(gid, videoBackupDir, url)
+			if err != nil {
+				slog.Error("backup scheduling failed", slog.Any("error", err), slog.String("url", url))
+				res.unscheduled++
+				state = backupError
+			} else if _, err := d.Store.Enqueue(ctx, store.EnqueueParams{Meta: meta, JobType: BackupJob}); err != nil {
+				slog.Error("backup scheduling failed", slog.Any("error", err), slog.String("url", url))
+				res.unscheduled++
+				state = backupError
+			} else {
+				state = backupScheduled
+			}
+		}
+
 		switch state {
 		case backupUnavailable:
 			// unplayable: youtube refuses it and there is no local copy, so queueing
@@ -208,8 +239,6 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 			res.unavailable++
 			continue
 		case backupError:
-
-			slog.Error("backup scheduling failed", slog.Any("error", err), slog.String("url", url))
 			res.unscheduled++
 		case backupPending, backupScheduled:
 			res.waiting++
@@ -219,6 +248,14 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 		res.queued++
 	}
 	return tracks, res, nil
+}
+
+// canonicalEntryURL is the url a playlist entry is cached and scheduled under.
+func canonicalEntryURL(e store.PlaylistEntry) string {
+	if e.YoutubeVideoID.String != "" {
+		return canonicalVideoURL(e.YoutubeVideoID.String)
+	}
+	return e.YoutubeUrl
 }
 
 // Only touches the store DB: cached media lives in the shared backup DB, so artefacts

@@ -196,10 +196,18 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 	return info, nil
 }
 
+// The dupe scan reads every archived image for the guild, so it only looks at a recent
+// window. Older uploads are never reported as duplicates, which is what keeps this from
+// growing without bound as the archive fills.
+const dupeScanWindow = 6 * 30 * 24 * time.Hour
+
 func (d *DBot) checkHashAgainstDB(gid string, hash uint64) (art backup.Artefact, unique bool) {
 	hash1 := goimagehash.NewExtImageHash([]uint64{hash}, goimagehash.DHash, 64)
 
-	data, err := d.Backup.GetArtefacts(d.Ctx, gid)
+	data, err := d.Backup.GetArtefacts(d.Ctx, backup.GetArtefactsParams{
+		Gid:       gid,
+		CreatedAt: time.Now().Add(-dupeScanWindow),
+	})
 	if err != nil {
 		slog.Error("failed to get Artiefacts", slog.Any("error", err))
 		return backup.Artefact{}, true

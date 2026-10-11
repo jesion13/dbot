@@ -7,6 +7,7 @@ package backup
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -51,10 +52,66 @@ WHERE
     media_type in ('image/jpg','image/jpeg','image/png','image/webp')
 AND
     gid = ?
+AND
+    created_at >= ?
 `
 
-func (q *Queries) GetArtefacts(ctx context.Context, gid string) ([]Artefact, error) {
-	rows, err := q.db.QueryContext(ctx, getArtefacts, gid)
+type GetArtefactsParams struct {
+	Gid       string
+	CreatedAt time.Time
+}
+
+// The dupe scan runs on every posted image and compares against the whole archive, so
+// it only looks at a recent window. Older uploads are never reported as duplicates.
+func (q *Queries) GetArtefacts(ctx context.Context, arg GetArtefactsParams) ([]Artefact, error) {
+	rows, err := q.db.QueryContext(ctx, getArtefacts, arg.Gid, arg.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Artefact
+	for rows.Next() {
+		var i Artefact
+		if err := rows.Scan(
+			&i.OriginUrl,
+			&i.Path,
+			&i.MediaType,
+			&i.Hash,
+			&i.CreatedAt,
+			&i.Gid,
+			&i.Chid,
+			&i.Msgid,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getArtefactsByURLs = `-- name: GetArtefactsByURLs :many
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid FROM artefacts
+WHERE origin_url IN (/*SLICE:origin_urls*/?)
+`
+
+func (q *Queries) GetArtefactsByURLs(ctx context.Context, originUrls []string) ([]Artefact, error) {
+	query := getArtefactsByURLs
+	var queryParams []interface{}
+	if len(originUrls) > 0 {
+		for _, v := range originUrls {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:origin_urls*/?", strings.Repeat(",?", len(originUrls))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:origin_urls*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
 	if err != nil {
 		return nil, err
 	}

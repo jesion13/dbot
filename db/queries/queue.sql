@@ -37,3 +37,11 @@ SELECT * FROM queue
 WHERE job_type = :job_type AND meta = :meta
 ORDER BY id DESC
 LIMIT 1;
+
+-- The batch form of LatestJob, so a whole playlist resolves in one query instead of
+-- one per entry. Callers must keep the last row per meta: the ordering is the same as
+-- LatestJob's, so the newest row for a meta comes last.
+-- name: LatestJobsByMeta :many
+SELECT * FROM queue
+WHERE job_type = ? AND meta IN (sqlc.slice('metas'))
+ORDER BY id ASC;

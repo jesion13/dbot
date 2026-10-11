@@ -23,12 +23,20 @@ SET path = :path,
     msgid = :msgid
 WHERE origin_url = :origin_url;
 
+-- The dupe scan runs on every posted image and compares against the whole archive, so
+-- it only looks at a recent window. Older uploads are never reported as duplicates.
 -- name: GetArtefacts :many
 SELECT * FROM artefacts
 WHERE
     media_type in ('image/jpg','image/jpeg','image/png','image/webp')
 AND
-    gid = ?;
+    gid = ?
+AND
+    created_at >= ?;
+
+-- name: GetArtefactsByURLs :many
+SELECT * FROM artefacts
+WHERE origin_url IN (sqlc.slice('origin_urls'));
 
 -- name: DeleteArtefact :exec
 DELETE FROM artefacts WHERE gid = :gid AND chid = :chid and msgid = :msgid;
