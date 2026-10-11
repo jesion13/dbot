@@ -18,6 +18,7 @@ import (
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/disgo/rest"
+	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,6 +31,17 @@ var (
 	panelChannel = snowflake.ID(20)
 	panelMessage = snowflake.ID(30)
 )
+
+// stubConn is a voice connection the queue listener never writes to, but which
+// still answers the calls a closing player makes.
+type stubConn struct {
+	voice.Conn
+	gid snowflake.ID
+}
+
+func (s stubConn) GuildID() snowflake.ID { return s.gid }
+
+func (s stubConn) SetSpeaking(context.Context, voice.SpeakingFlags) error { return nil }
 
 // panelSnapshot builds a snapshot of n tracks with the given 1-based current position,
 // or an idle one when current is 0.
@@ -322,6 +334,10 @@ type panelBot struct {
 	edited []snowflake.ID
 	// updates records the MessageUpdate each rewrite carried
 	updates []discord.MessageUpdate
+	// followups records post-acknowledgement replies to the user
+	followups []discord.MessageCreate
+	// superseded makes panelIsNewest report that something was posted after the panel
+	superseded bool
 	// nextID hands out a fresh message id per publish
 	nextID snowflake.ID
 	// mu guards the recorders: a replacement deletes outside the registry lock, so
@@ -380,6 +396,17 @@ func newPanelBot(t *testing.T, tracks ...player.Track) *panelBot {
 		pb.mu.Lock()
 		pb.edited = append(pb.edited, msgID)
 		pb.updates = append(pb.updates, u)
+		pb.mu.Unlock()
+		return nil
+	}
+	d.newestPanel = func(_, msgID snowflake.ID) (bool, error) {
+		pb.mu.Lock()
+		defer pb.mu.Unlock()
+		return !pb.superseded, nil
+	}
+	d.followupPanel = func(_ string, m discord.MessageCreate) error {
+		pb.mu.Lock()
+		pb.followups = append(pb.followups, m)
 		pb.mu.Unlock()
 		return nil
 	}
@@ -636,7 +663,7 @@ func TestPanelSendsBeforeDeleting(t *testing.T) {
 		order = append(order, fmt.Sprintf("delete:%d", id))
 		return nil
 	}
-	require.NoError(t, tb.swapPanel(panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
+	require.NoError(t, tb.swapPanel(context.Background(), panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
 		order = append(order, "send")
 		return panelMessage + 1, nil
 	}))
@@ -653,7 +680,7 @@ func TestPanelFailedSendKeepsTheCurrentPanelUsable(t *testing.T) {
 	tb.sent = nil
 
 	tb.sendErr = errors.New("rate limited")
-	err := tb.swapPanel(panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
+	err := tb.swapPanel(context.Background(), panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
 		return 0, tb.sendErr
 	})
 	tb.sendErr = nil
@@ -672,7 +699,7 @@ func TestPanelReplacementDeactivatesThePrevious(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(3)...)
 	stale := tb.registerPanel(1, panelMessage)
 
-	require.NoError(t, tb.swapPanel(panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
+	require.NoError(t, tb.swapPanel(context.Background(), panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
 		return panelMessage + 1, nil
 	}))
 
@@ -692,7 +719,7 @@ func TestPanelDeleteFailureStillDeactivatesTheOldPanel(t *testing.T) {
 
 	tb.deletePanel = func(snowflake.ID, snowflake.ID) error { return errors.New("forbidden") }
 	tb.editPanel = func(context.Context, snowflake.ID, snowflake.ID, discord.MessageUpdate) error { return nil }
-	require.NoError(t, tb.swapPanel(panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
+	require.NoError(t, tb.swapPanel(context.Background(), panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
 		return panelMessage + 1, nil
 	}))
 
@@ -700,21 +727,23 @@ func TestPanelDeleteFailureStillDeactivatesTheOldPanel(t *testing.T) {
 		"a message we failed to delete must still not control playback")
 }
 
-// A tick and a click must not both publish. publish holds the registry lock across
-// the send, so replacements are serialized.
+// Serialization is the per-guild update lock every caller holds; publish itself only
+// guarantees a generation is never handed out twice under that lock.
 func TestPanelReplacementIsSerialized(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 
-	var wg sync.WaitGroup
 	var mu sync.Mutex
-	var maxActive uint64
 	var gens []uint64
 
+	var wg sync.WaitGroup
 	for range 8 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = tb.swapPanel(panelGID, panelChannel, func(gen uint64) (snowflake.ID, error) {
+			unlock := tb.panels.lockUpdate(panelGID)
+			defer unlock()
+
+			_ = tb.swapPanel(context.Background(), panelGID, panelChannel, func(gen uint64) (snowflake.ID, error) {
 				mu.Lock()
 				gens = append(gens, gen)
 				mu.Unlock()
@@ -724,70 +753,80 @@ func TestPanelReplacementIsSerialized(t *testing.T) {
 	}
 	wg.Wait()
 
-	// every publish got its own generation, and the registry kept exactly one panel
 	cur, ok := tb.panels.active(panelGID)
 	require.True(t, ok)
-	assert.Equal(t, uint64(len(gens)), cur.generation, "no two replacements shared a generation")
+	assert.Equal(t, uint64(len(gens)), cur.generation,
+		"every replacement advanced the generation exactly once")
 
 	seen := map[uint64]bool{}
 	for _, g := range gens {
 		assert.False(t, seen[g], "generation %d was handed out twice", g)
 		seen[g] = true
 	}
-	_ = maxActive
 }
 
 // --- refresh -----------------------------------------------------------------
 
-// The panel is rewritten on every tick even when nothing changed, so what the channel
-// shows is always current - and it is the same message, so a button being reached for
-// stays valid.
-func TestPanelRefreshRewritesTheSameMessage(t *testing.T) {
+// While the panel is still the newest message in the channel a tick rewrites it in
+// place: the message id and generation do not move, so every button stays valid.
+func TestPanelRefreshEditsWhileThePanelIsNewest(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 	tb.registerPanel(1, panelMessage)
 	tb.sent = nil
+	tb.deleted = nil
 
-	before := tb.Player().QueueSnapshot().CurrentIndex
-	for range 3 {
-		require.NoError(t, tb.refreshOnce(context.Background(), panelGID))
-	}
-	assert.Equal(t, before, tb.Player().QueueSnapshot().CurrentIndex, "nothing about playback moved")
+	first, _ := tb.panels.active(panelGID)
 
-	assert.Empty(t, tb.sentIDs(), "a refresh must never post a new message")
-	assert.Empty(t, tb.deletedIDs(), "nor delete anything")
-	assert.Equal(t, []snowflake.ID{panelMessage, panelMessage, panelMessage}, tb.editedIDs(),
-		"the same panel is rewritten every time")
+	require.NoError(t, tb.refreshOnce(context.Background(), panelGID))
 
-	cur, ok := tb.panels.active(panelGID)
+	after, ok := tb.panels.active(panelGID)
 	require.True(t, ok)
-	assert.Equal(t, panelMessage, cur.messageID)
-	assert.Equal(t, uint64(1), cur.generation,
-		"rewriting must not bump the generation, or it would invalidate the very button being pressed")
-
-	require.Len(t, tb.updates, 3)
-	for _, u := range tb.updates {
-		require.NotNil(t, u.Components)
-		assert.NotEmpty(t, *u.Components, "each rewrite carries the panel")
-	}
+	assert.Equal(t, first.messageID, after.messageID, "no new message was posted")
+	assert.Equal(t, first.generation, after.generation, "nor did the generation move")
+	assert.Empty(t, tb.sentIDs(), "nothing sent")
+	assert.Empty(t, tb.deletedIDs(), "nothing deleted")
+	assert.Equal(t, []snowflake.ID{panelMessage}, tb.editedIDs(), "the panel was rewritten in place")
 }
 
-// A failing rewrite must be reported and must leave the panel registered, so the
-// next tick can try again and the buttons keep working.
+// Once something else is posted after the panel, it is no longer the newest message,
+// so a tick moves it back to the bottom.
+func TestPanelRefreshRepublishesOnceSuperseded(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(2)...)
+	tb.registerPanel(1, panelMessage)
+	tb.sent = nil
+	tb.deleted = nil
+
+	first, _ := tb.panels.active(panelGID)
+	tb.superseded = true
+
+	require.NoError(t, tb.refreshOnce(context.Background(), panelGID))
+
+	after, ok := tb.panels.active(panelGID)
+	require.True(t, ok)
+	assert.NotEqual(t, first.messageID, after.messageID, "a new message was posted")
+	assert.Equal(t, first.generation+1, after.generation, "and the generation moved on")
+	assert.Equal(t, 1, tb.sentCount())
+	assert.Equal(t, []snowflake.ID{panelMessage}, tb.deletedIDs(), "retiring the old one")
+}
+
+// A failed publish keeps the previous panel registered and usable; nothing is deleted.
 func TestPanelRefreshFailureKeepsThePanel(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 	tb.registerPanel(1, panelMessage)
 	tb.sent = nil
-	tb.editPanel = func(context.Context, snowflake.ID, snowflake.ID, discord.MessageUpdate) error {
-		return errors.New("boom")
-	}
+	tb.deleted = nil
+	tb.superseded = true // force the republish path
+	tb.sendErr = errors.New("boom")
 
 	err := tb.refreshOnce(context.Background(), panelGID)
+	tb.sendErr = nil
 
 	require.Error(t, err)
-	assert.Empty(t, tb.deletedIDs(), "a failed rewrite must not delete anything")
+	assert.Empty(t, tb.deletedIDs(), "a failed publish must not retire anything")
 	cur, ok := tb.panels.active(panelGID)
-	require.True(t, ok, "the panel is still registered")
+	require.True(t, ok, "the previous panel is still active")
 	assert.Equal(t, panelMessage, cur.messageID)
+	assert.Equal(t, uint64(1), cur.generation, "and keeps its generation")
 }
 
 func TestPanelWorkerIsCancelledOnReplace(t *testing.T) {
@@ -976,6 +1015,20 @@ func newPanelRecorder(t *testing.T, tb *testBot) *panelBot {
 		pb.mu.Unlock()
 		return nil
 	}
+	tb.followupPanel = func(_ string, m discord.MessageCreate) error {
+		pb.mu.Lock()
+		defer pb.mu.Unlock()
+		pb.followups = append(pb.followups, m)
+		return nil
+	}
+	tb.newestPanel = func(_, _ snowflake.ID) (bool, error) { return true, nil }
+	tb.editPanel = func(_ context.Context, _, msgID snowflake.ID, u discord.MessageUpdate) error {
+		pb.mu.Lock()
+		pb.edited = append(pb.edited, msgID)
+		pb.updates = append(pb.updates, u)
+		pb.mu.Unlock()
+		return nil
+	}
 	return pb
 }
 
@@ -1029,14 +1082,7 @@ func TestButtonEventCarriesItsMessage(t *testing.T) {
 func TestPanelClickIsSerializedAgainstUpdates(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(4)...)
 	tb.registerPanel(1, panelMessage)
-	pb := &panelBot{DBot: tb.DBot, nextID: panelMessage + 1, record: true}
-	tb.editPanel = func(_ context.Context, _, msgID snowflake.ID, u discord.MessageUpdate) error {
-		pb.mu.Lock()
-		pb.edited = append(pb.edited, msgID)
-		pb.updates = append(pb.updates, u)
-		pb.mu.Unlock()
-		return nil
-	}
+	pb := tb
 
 	var got []discord.InteractionResponseType
 	var mu sync.Mutex
@@ -1046,7 +1092,7 @@ func TestPanelClickIsSerializedAgainstUpdates(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		tb.onPanelComponent(buttonEventRecording(t, panelGID, panelChannel, panelUser, panelMessage,
+		tb.onPanelComponent(context.Background(), buttonEventRecording(t, panelGID, panelChannel, panelUser, panelMessage,
 			playerPanelID(1, playerPanelBtnNext), &got))
 	}()
 
@@ -1056,47 +1102,63 @@ func TestPanelClickIsSerializedAgainstUpdates(t *testing.T) {
 	mu.Unlock()
 	assert.Equal(t, 0, answers, "a click must not answer while an update is in flight")
 	assert.Equal(t, 1, tb.Player().QueueSnapshot().CurrentIndex, "nor act on the player")
+	assert.Empty(t, pb.editedIDs(), "nor rewrite the panel")
 
 	unlock()
 	<-done
 
-	assert.Equal(t, []discord.InteractionResponseType{discord.InteractionResponseTypeUpdateMessage}, got,
-		"and it answers once the update finishes")
+	assert.Equal(t, []discord.InteractionResponseType{discord.InteractionResponseTypeDeferredUpdateMessage}, got,
+		"and it acknowledges exactly once when the update finishes")
 	assert.Equal(t, 2, tb.Player().QueueSnapshot().CurrentIndex, "having applied its action")
+	// the panel is still the newest message, so the press rewrites it rather than
+	// retiring it - which is what keeps the next press working
+	assert.Equal(t, []snowflake.ID{panelMessage}, pb.editedIDs())
+	assert.Empty(t, pb.sentIDs(), "and publishes nothing new")
 }
 
 // A panel we could not delete must stop looking live, or people click it and are
 // told the panel is gone. It is replaced with a note saying so.
 func TestPanelDeleteFailureRetiresTheOldMessage(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
-	tb.registerPanel(1, panelMessage)
+	stale := tb.registerPanel(1, panelMessage)
 
 	tb.deletePanel = func(snowflake.ID, snowflake.ID) error { return errors.New("missing permissions") }
 
 	var retired struct {
-		mu        sync.Mutex
-		id        snowflake.ID
-		content   string
-		callCount int
+		mu      sync.Mutex
+		id      snowflake.ID
+		updates []discord.MessageUpdate
 	}
 	tb.editPanel = func(_ context.Context, _, msgID snowflake.ID, u discord.MessageUpdate) error {
 		retired.mu.Lock()
 		defer retired.mu.Unlock()
 		retired.id = msgID
-		if u.Content != nil {
-			retired.content = *u.Content
-		}
-		retired.callCount++
+		retired.updates = append(retired.updates, u)
 		return nil
 	}
 
-	require.NoError(t, tb.swapPanel(panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
+	require.NoError(t, tb.swapPanel(context.Background(), panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
 		return panelMessage + 1, nil
 	}))
 
-	assert.Equal(t, panelMessage, retired.id, "the message that stayed behind is rewritten")
-	assert.Contains(t, retired.content, "no longer active")
-	assert.Equal(t, 1, retired.callCount)
+	require.NotEmpty(t, retired.updates, "the message that stayed behind is rewritten")
+	assert.Equal(t, panelMessage, retired.id)
+
+	u := retired.updates[0]
+	require.NotNil(t, u.Flags)
+	assert.True(t, u.Flags.Has(discord.MessageFlagIsComponentsV2),
+		"a Components V2 message rejects a plain content update, so the retirement must be V2 too")
+	assert.Nil(t, u.Content, "no plain content may be sent alongside V2 components")
+	require.NotNil(t, u.Components)
+
+	rendered := discord.MessageCreate{Components: *u.Components}
+	assert.Contains(t, strings.Join(panelText(t, rendered), "\n"), "no longer active")
+	for _, b := range panelButtonsOf(t, rendered) {
+		assert.True(t, b.Disabled, "a retired panel must not look clickable")
+	}
+
+	assert.Contains(t, tb.resolvePanelClick(stale).Reject, "no longer active",
+		"and its buttons are refused whether or not the retirement edit worked")
 }
 
 // A panel in another channel is not ours to drive, even if the ids line up.
@@ -1153,36 +1215,36 @@ func TestPanelButtonStaysValidAcrossRefreshes(t *testing.T) {
 	assert.Empty(t, res.Reject, "a button on the visible panel still works")
 }
 
-// /player in the channel that already holds the panel must refresh it, not post a
-// second one.
-func TestHandlePlayerIsIdempotentInTheSameChannel(t *testing.T) {
+// Every /player publishes a replacement, including in the channel that already holds
+// one, so the panel is always the newest message there.
+func TestHandlePlayerAlwaysPublishesAReplacement(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(3)...)
 	require.NoError(t, tb.handlePlayer(context.Background(), slashEvent(t, panelGID, panelChannel, panelUser)))
 
 	first, _ := tb.panels.active(panelGID)
-	tb.replies = nil
-	tb.sent = nil
+	require.Equal(t, panelMessage, first.messageID)
 
+	tb.replies = nil
 	require.NoError(t, tb.handlePlayer(context.Background(), slashEvent(t, panelGID, panelChannel, panelUser)))
 
-	assert.Empty(t, tb.sentIDs(), "no second panel is posted")
-	assert.Empty(t, tb.deletedIDs(), "and nothing is deleted")
-	assert.Equal(t, []snowflake.ID{panelMessage}, tb.editedIDs(), "the same panel is rewritten")
-	assert.Len(t, tb.replies, 1, "but the command is still answered")
-
-	after, _ := tb.panels.active(panelGID)
-	assert.Equal(t, first.messageID, after.messageID)
+	after, ok := tb.panels.active(panelGID)
+	require.True(t, ok)
+	assert.NotEqual(t, first.messageID, after.messageID, "a replacement was published")
+	assert.Equal(t, first.generation+1, after.generation)
+	assert.Len(t, tb.replies, 1, "and the command still answers the interaction")
+	assert.Equal(t, []snowflake.ID{first.messageID}, tb.deletedIDs(), "retiring the one it replaced")
 }
 
-// Every button press must answer the interaction exactly once, inside discord's
-// deadline. Answering nothing is what produces "didn't respond in time".
+// second one.
+
+// Every button press must answer the interaction exactly once. disgo's Acknowledge
+// sends response type 2, which discord no longer accepts, so the silent deferred
+// update is the ack that actually works - and it must be the only initial response.
 func TestEveryButtonPressAnswersExactlyOnce(t *testing.T) {
 	for _, action := range []string{
 		playerPanelBtnPrev, playerPanelBtnPause, playerPanelBtnNext, playerPanelBtnEvent,
 	} {
 		t.Run(action, func(t *testing.T) {
-			// a real store: Event reads the sound library, and a bot without one is a
-			// state production never reaches
 			tb := newTestBot(t)
 			tb.GuildID = panelGID
 			_ = tb.MusicPlayer.Close()
@@ -1192,28 +1254,39 @@ func TestEveryButtonPressAnswersExactlyOnce(t *testing.T) {
 			c := cache.New(cache.WithCaches(cache.FlagsAll))
 			c.AddVoiceState(discord.VoiceState{GuildID: panelGID, UserID: panelUser, ChannelID: &panelBotVC})
 			tb.Client = &bot.Client{Caches: c}
-
 			require.NoError(t, tb.MusicPlayer.EnqueueMany(panelTracks(4)))
 
-			panel := &panelBot{DBot: tb.DBot, nextID: panelMessage + 1, record: true}
+			panel := newPanelRecorder(t, tb)
 			panel.registerPanel(1, panelMessage)
 
 			var got []discord.InteractionResponseType
-			panel.onPanelComponent(buttonEventRecording(t, panelGID, panelChannel, panelUser, panelMessage,
-				playerPanelID(1, action), &got))
+			panel.onPanelComponent(context.Background(), buttonEventRecording(t, panelGID, panelChannel,
+				panelUser, panelMessage, playerPanelID(1, action), &got))
 
-			require.Len(t, got, 1, "%s must answer exactly once", action)
-
-			// prev at position 1 and event with no sounds both genuinely fail, so they
-			// answer ephemerally; anything that worked rewrites the panel
-			worked := action == playerPanelBtnPause || action == playerPanelBtnNext
-			want := discord.InteractionResponseTypeCreateMessage
-			if worked {
-				want = discord.InteractionResponseTypeUpdateMessage
-			}
-			assert.Equal(t, want, got[0], "%s answered the wrong way", action)
+			require.Len(t, got, 1, "%s must send exactly one initial response", action)
+			assert.Equal(t, discord.InteractionResponseTypeDeferredUpdateMessage, got[0],
+				"%s must acknowledge with the deferred update", action)
 		})
 	}
+}
+
+// An action that fails after the acknowledgement must not send a second initial
+// response; the user is told through the follow-up instead.
+func TestFailedActionUsesAFollowupNotASecondResponse(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(4)...)
+	pb := tb
+	pb.registerPanel(1, panelMessage)
+
+	var got []discord.InteractionResponseType
+	// prev at position 1 has nowhere to go back to
+	tb.onPanelComponent(context.Background(), buttonEventRecording(t, panelGID, panelChannel,
+		panelUser, panelMessage, playerPanelID(1, playerPanelBtnPrev), &got))
+
+	assert.Equal(t, []discord.InteractionResponseType{discord.InteractionResponseTypeDeferredUpdateMessage}, got,
+		"only the acknowledgement")
+	require.NotEmpty(t, pb.followups, "the failure is reported through the follow-up")
+	assert.Contains(t, pb.followups[0].Content, "earlier track")
+	assert.True(t, pb.followups[0].Flags.Has(discord.MessageFlagEphemeral), "privately")
 }
 
 // A rejected press answers ephemerally and touches nothing else.
@@ -1223,10 +1296,170 @@ func TestRejectedPressStillAnswers(t *testing.T) {
 
 	var got []discord.InteractionResponseType
 	// a generation the panel does not carry
-	tb.onPanelComponent(buttonEventRecording(t, panelGID, panelChannel, panelUser, panelMessage,
+	tb.onPanelComponent(context.Background(), buttonEventRecording(t, panelGID, panelChannel, panelUser, panelMessage,
 		playerPanelID(99, playerPanelBtnNext), &got))
 
 	require.Len(t, got, 1, "a refused press must still answer")
 	assert.Equal(t, discord.InteractionResponseTypeCreateMessage, got[0],
 		"and it says why, privately")
+}
+
+// A slow Discord request for one guild must not hold the registry's global mutex and
+// block every other guild. publish releases it around the send.
+func TestSlowGuildDoesNotBlockAnother(t *testing.T) {
+	var r panelRegistry
+	slow, fast := snowflake.ID(1), snowflake.ID(2)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	slowDone := make(chan struct{})
+	go func() {
+		defer close(slowDone)
+		_, _, _ = r.publish(slow, panelChannel, func(uint64) (snowflake.ID, error) {
+			close(started)
+			<-release
+			return 100, nil
+		})
+	}()
+	<-started
+
+	acquired := make(chan struct{})
+	go func() {
+		unlock := r.lockUpdate(fast)
+		close(acquired)
+		unlock()
+	}()
+
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		close(release)
+		<-slowDone
+		t.Fatal("another guild was blocked by a slow request for a different guild")
+	}
+
+	// the slow guild still completes and registers normally
+	close(release)
+	<-slowDone
+
+	cur, ok := r.active(slow)
+	require.True(t, ok)
+	assert.Equal(t, snowflake.ID(100), cur.messageID)
+
+	// and its own update lock serializes it, as before
+	unlock := r.lockUpdate(slow)
+	unlock()
+}
+
+// --- persistence -------------------------------------------------------------
+
+// The panel's identity has to outlive the process, or a restart leaves an orphan no
+// code will ever delete.
+func TestPanelIdentitySurvivesARestart(t *testing.T) {
+	tb := newTestBot(t)
+	tb.GuildID = panelGID
+	tb.bindPanelStore(tb.Ctx)
+
+	pb := newPanelRecorder(t, tb)
+	ctx := context.Background()
+
+	require.NoError(t, tb.swapPanel(ctx, panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
+		return pb.send(0)
+	}))
+
+	row, err := tb.Store.GetPlayerPanel(tb.Ctx, panelGID.String())
+	require.NoError(t, err, "the published panel must be recorded")
+	assert.Equal(t, panelChannel.String(), row.ChannelID)
+	assert.Equal(t, pb.nextID-1, snowflake.MustParse(row.MessageID))
+
+	// a fresh bot against the same database, as after a restart
+	restarted := &DBot{Ctx: tb.Ctx, Store: tb.Store, GuildID: panelGID}
+	restarted.bindPanelStore(tb.Ctx)
+	var deleted []snowflake.ID
+	restarted.deletePanel = func(_, msgID snowflake.ID) error {
+		deleted = append(deleted, msgID)
+		return nil
+	}
+
+	restarted.cleanupOrphanPanel(tb.Ctx, panelGID)
+
+	assert.Equal(t, []snowflake.ID{pb.nextID - 1}, deleted,
+		"the new process must find and delete the panel the old one left")
+
+	_, err = tb.Store.GetPlayerPanel(tb.Ctx, panelGID.String())
+	assert.Error(t, err, "and the record is cleared, so it is not chased again")
+}
+
+// A panel that was already deleted by hand must not turn into a startup error, and
+// must not be chased on every restart.
+func TestOrphanCleanupToleratesAMissingPanel(t *testing.T) {
+	tb := newTestBot(t)
+	tb.GuildID = panelGID
+	tb.bindPanelStore(tb.Ctx)
+	tb.deletePanel = func(snowflake.ID, snowflake.ID) error {
+		return errors.New("unknown message")
+	}
+	tb.cleanupOrphanPanel(tb.Ctx, panelGID) // nothing recorded: a no-op
+	tb.cleanupOrphanPanel(tb.Ctx, panelGID)
+
+	var attempts int
+	tb.deletePanel = func(snowflake.ID, snowflake.ID) error {
+		attempts++
+		return errors.New("unknown message")
+	}
+	_, err := tb.Store.UpsertPlayerPanel(tb.Ctx, store.UpsertPlayerPanelParams{
+		GuildID: panelGID.String(), ChannelID: panelChannel.String(),
+		MessageID: panelMessage.String(), Generation: 1,
+	})
+	require.NoError(t, err)
+
+	tb.cleanupOrphanPanel(tb.Ctx, panelGID)
+
+	assert.Equal(t, 1, attempts, "one attempt, no retry loop")
+}
+
+// Recording must never fail a publish that already succeeded.
+func TestPanelRecordFailureDoesNotBreakThePublish(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(2)...)
+	tb.rememberPanelRow = func(context.Context, snowflake.ID, panelEntry) error {
+		return errors.New("db down")
+	}
+
+	require.NoError(t, tb.swapPanel(context.Background(), panelGID, panelChannel,
+		func(uint64) (snowflake.ID, error) { return panelMessage, nil }))
+
+	cur, ok := tb.panels.active(panelGID)
+	require.True(t, ok, "the panel is live regardless")
+	assert.Equal(t, panelMessage, cur.messageID)
+}
+
+// --- retained helpers --------------------------------------------------------
+
+// displayTitle keeps an imported title on one line. This used to serve the text queue
+// commands; the panel renderer relies on it now.
+func TestDisplayTitleCollapsesWhitespace(t *testing.T) {
+	assert.Equal(t,
+		"Hiszpańskie Dziewczyny Szanty - Bitwa + lyrics Czarnobrody Kapitan",
+		displayTitle("Hiszpańskie Dziewczyny\n\nSzanty - Bitwa + lyrics\nCzarnobrody Kapitan"))
+	assert.Equal(t, "normal Title", displayTitle("normal\tTitle"))
+	assert.Equal(t, "spaced out", displayTitle("  spaced   out  "))
+	assert.Equal(t, untitledTrack, displayTitle("   "), "a blank title must not look like an empty row")
+	assert.Equal(t, untitledTrack, displayTitle("\n\t"))
+}
+
+func TestQueueErrTextCoversThePlayerErrors(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{player.ErrNoPreviousTrack, "there is no earlier track in the queue"},
+		{player.ErrNoNextTrack, "the queue is empty"},
+		{player.ErrInvalidPosition, player.ErrInvalidPosition.Error()},
+		{player.ErrClosed, "the player is closed"},
+		{player.ErrSoundQueueFull, "the sound queue is full"},
+		{errors.New("boom"), "fallback"},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, queueErrText(tt.err, "fallback"))
+	}
 }

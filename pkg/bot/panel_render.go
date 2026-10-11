@@ -186,3 +186,37 @@ func escapePanelMarkdown(title string) string {
 		")", "\\)",
 	).Replace(title)
 }
+
+// retiredPanelMessage is what a panel we could not delete is rewritten to. A Components
+// V2 message can only be updated with another V2 payload, so this is a full container
+// again - the notice, and the controls disabled so nothing looks clickable.
+func retiredPanelMessage() discord.MessageCreate {
+	disabled := func(e string, id string) discord.ButtonComponent {
+		return discord.NewSecondaryButton("", id).WithEmoji(discord.ComponentEmoji{Name: e}).AsDisabled()
+	}
+	row := discord.NewActionRow(
+		disabled(playerPanelEmojiPrev, playerPanelBtnPrefix+"retired-prev"),
+		disabled(playerPanelEmojiPause, playerPanelBtnPrefix+"retired-pause"),
+		disabled(playerPanelEmojiNext, playerPanelBtnPrefix+"retired-next"),
+		disabled(playerPanelEmojiEvent, playerPanelBtnPrefix+"retired-event"),
+	)
+	container := discord.NewContainer(
+		discord.NewTextDisplay("### This player panel is no longer active"),
+		discord.NewSmallSeparator(),
+		row,
+	)
+	return discord.NewMessageCreateV2(container)
+}
+
+// Imported metadata carries newlines, tabs and space runs; rendered raw, one entry
+// spills over several lines and the layout stops lining up.
+func displayTitle(title string) string {
+	one := strings.Join(strings.Fields(title), " ")
+	if one == "" {
+		return untitledTrack
+	}
+	return one
+}
+
+// stands in for a title that is empty or whitespace only
+const untitledTrack = "(untitled)"

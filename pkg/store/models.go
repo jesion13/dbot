@@ -29,6 +29,14 @@ type Channel struct {
 	DeletedAt sql.NullTime
 }
 
+type PlayerPanel struct {
+	GuildID    string
+	ChannelID  string
+	MessageID  string
+	Generation int64
+	UpdatedAt  sql.NullTime
+}
+
 type Playlist struct {
 	ID                int64
 	GuildID           string

@@ -32,7 +32,7 @@ func (d *DBot) RegisterEventListiners() {
 		bot.NewListenerFunc(d.onUserVoiceStateChange),
 		bot.NewListenerFunc(d.messageDeleteListener),
 		bot.NewListenerFunc(d.playlistAutocomplete),
-		bot.NewListenerFunc(d.onPanelComponent),
+		bot.NewListenerFunc(d.onPanelComponentEvent),
 	)
 }
 
@@ -136,11 +136,6 @@ func (d *DBot) messagesListener(e *events.GuildMessageCreate) {
 	// if err != nil {
 	// 	return err
 	// }
-
-	// before sound matching: "!next" and friends would fuzzy-match a sound alias
-	if d.queueCommandListener(m) {
-		return
-	}
 
 	isKnownSound(d, m)
 	soundAll(d, m)

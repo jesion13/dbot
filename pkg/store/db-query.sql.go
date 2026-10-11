@@ -54,6 +54,16 @@ func (q *Queries) DeleteChannel(ctx context.Context, chid string) error {
 	return err
 }
 
+const deletePlayerPanel = `-- name: DeletePlayerPanel :exec
+DELETE FROM player_panels
+WHERE guild_id = ?
+`
+
+func (q *Queries) DeletePlayerPanel(ctx context.Context, guildID string) error {
+	_, err := q.db.ExecContext(ctx, deletePlayerPanel, guildID)
+	return err
+}
+
 const getChannel = `-- name: GetChannel :one
 SELECT gid, chid, ch_name, type, created_at, updated_at, deleted_at FROM channels
 WHERE gid = ? AND type = ? LIMIT 1
@@ -75,6 +85,24 @@ func (q *Queries) GetChannel(ctx context.Context, arg GetChannelParams) (Channel
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const getPlayerPanel = `-- name: GetPlayerPanel :one
+SELECT guild_id, channel_id, message_id, generation, updated_at FROM player_panels
+WHERE guild_id = ? LIMIT 1
+`
+
+func (q *Queries) GetPlayerPanel(ctx context.Context, guildID string) (PlayerPanel, error) {
+	row := q.db.QueryRowContext(ctx, getPlayerPanel, guildID)
+	var i PlayerPanel
+	err := row.Scan(
+		&i.GuildID,
+		&i.ChannelID,
+		&i.MessageID,
+		&i.Generation,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -150,4 +178,40 @@ func (q *Queries) SelectSounds(ctx context.Context, gid string) ([]Sound, error)
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertPlayerPanel = `-- name: UpsertPlayerPanel :one
+INSERT INTO player_panels (guild_id, channel_id, message_id, generation)
+VALUES (?1, ?2, ?3, ?4)
+ON CONFLICT (guild_id) DO UPDATE SET
+    channel_id = excluded.channel_id,
+    message_id = excluded.message_id,
+    generation = excluded.generation,
+    updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+RETURNING guild_id, channel_id, message_id, generation, updated_at
+`
+
+type UpsertPlayerPanelParams struct {
+	GuildID    string
+	ChannelID  string
+	MessageID  string
+	Generation int64
+}
+
+func (q *Queries) UpsertPlayerPanel(ctx context.Context, arg UpsertPlayerPanelParams) (PlayerPanel, error) {
+	row := q.db.QueryRowContext(ctx, upsertPlayerPanel,
+		arg.GuildID,
+		arg.ChannelID,
+		arg.MessageID,
+		arg.Generation,
+	)
+	var i PlayerPanel
+	err := row.Scan(
+		&i.GuildID,
+		&i.ChannelID,
+		&i.MessageID,
+		&i.Generation,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
