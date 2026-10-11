@@ -57,6 +57,10 @@ var cmds = []discord.ApplicationCommandCreate{
 		DefaultMemberPermissions: omit.NewPtr(discord.PermissionAdministrator),
 	},
 	discord.SlashCommandCreate{
+		Name:        "player",
+		Description: "show the player panel in this channel",
+	},
+	discord.SlashCommandCreate{
 		Name:        "pause-play",
 		Description: "play pause",
 	},
@@ -164,6 +168,7 @@ func (d *DBot) CommandHandlers() map[string]cmdHandler {
 		"playlist-delete": d.handlePlaylistDelete,
 		"wypierdalaj":     d.handleWypierdalaj,
 		"set-bot-channel": d.handleMapChannel,
+		"player":          d.handlePlayer,
 		"pause-play":      d.handlePause,
 		"sound":           d.handleSound,
 		"to-mp4":          d.handleToMP4,

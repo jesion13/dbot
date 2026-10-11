@@ -245,16 +245,8 @@ func (d *DBot) queueCommandReply(m discord.Message) (string, bool) {
 		return "queue commands only work in a server", true
 	}
 
-	conn, botChanID := d.Player().Conn()
-	if conn == nil {
-		return "i am not connected to a voice channel", true
-	}
-	vs, vsErr := d.getUserVC(*m.GuildID, m.Author.ID)
-	if vsErr != nil || vs.ChannelID == nil {
-		return "join a voice channel first", true
-	}
-	if *vs.ChannelID != botChanID {
-		return "join my voice channel first", true
+	if reason := d.voiceGuard(*m.GuildID, m.Author.ID); reason != "" {
+		return reason, true
 	}
 	return runQueueCommand(cmd, d.Player()), true
 }

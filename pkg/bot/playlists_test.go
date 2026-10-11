@@ -626,9 +626,9 @@ func bumpQueueFailCount(t *testing.T, tb *testBot, videoURL string, n int64) {
 	require.NotZero(t, affected)
 }
 
-// Realistic yt-dlp stderr fragments. Only a confirmed cause is permanent: a generic
-// "Video unavailable" also covers region blocks, temporary privacy and broken
-// cookies, and parking those would block recovery forever.
+// Realistic yt-dlp stderr fragments. Only a confirmed cause is permanent. A generic
+// "Video unavailable" counts as dead: youtube answers it for every video it will never
+// serve, and retrying it only burns yt-dlp runs and log noise on each /playlist.
 func TestIsUnavailableVideo(t *testing.T) {
 	tests := []struct {
 		name string
@@ -651,8 +651,8 @@ func TestIsUnavailableVideo(t *testing.T) {
 			errors.New("ERROR: [youtube] x: This video is no longer available because the account associated with this video has been terminated."),
 			true,
 		},
+		{"generic unavailable", errors.New("ERROR: [youtube] x: Video unavailable"), true},
 		// everything below must stay retryable
-		{"generic unavailable", errors.New("ERROR: [youtube] x: Video unavailable"), false},
 		{
 			"private",
 			errors.New("ERROR: [youtube] x: Private video. Sign in if you've been granted access"),

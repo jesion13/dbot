@@ -55,6 +55,15 @@ type DBot struct {
 	playerErrs chan player.Err
 	// lets a test assert that retired players leave no forwarder behind
 	playerForwarders atomic.Int32
+	// panels holds the one live player panel per guild; a replaced panel is dropped
+	// from here, so its buttons stop working
+	panels  panelRegistry
+	lastSig string
+
+	// discord seams for the panel, replaced in tests
+	answerPanel func(snowflake.ID, string, discord.MessageCreate) (snowflake.ID, error)
+	createPanel func(context.Context, snowflake.ID, ...discord.LayoutComponent) (snowflake.ID, error)
+	deletePanel func(channelID, messageID snowflake.ID) error
 }
 
 // Never nil: tests build a DBot by hand, and selecting on a nil context panics.
@@ -249,6 +258,7 @@ func Start(ctx context.Context, client *bot.Client, dbstore *db.Store) *DBot {
 	}
 
 	go d.reportPlayerErrors(ctx)
+	go d.ensurePanel(ctx)
 	return &d
 }
 

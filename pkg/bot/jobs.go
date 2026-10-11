@@ -15,10 +15,13 @@ import (
 
 const BackupJob = "backup"
 
-// Only messages with a confirmed cause qualify. Anything generic - "Video
-// unavailable", "Private video", a region block, a sign-in or age prompt - stays
-// retryable: those can be temporary or resolved by a later attempt, and parking them
-// as unavailable would block recovery forever.
+// Only messages with a confirmed cause qualify. "Private video", a region block, a
+// sign-in or age prompt stay retryable: those can be temporary or resolved by a later
+// attempt, and parking them as unavailable would block recovery forever.
+// A bare "Video unavailable" is treated as dead too - it is what youtube answers for
+// every video it will never serve, and retrying it just burns yt-dlp runs and log
+// noise on every /playlist. A video parked this way can still come back by hand:
+// delete the "unavailable" queue row.
 //
 // shortcut: matching yt-dlp's stderr text; if upstream rewords a message we fall back
 // to retrying, which is noisy but not wrong.
@@ -35,6 +38,7 @@ func isUnavailableVideo(err error) bool {
 		"was removed by the uploader",
 		"account associated with this video has been terminated",
 		"this video is no longer available because the account",
+		"video unavailable",
 	} {
 		if strings.Contains(s, msg) {
 			return true
