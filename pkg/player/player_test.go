@@ -43,8 +43,6 @@ func newFake(t *testing.T) *fake {
 		sstarted: make(chan string, 256),
 	}
 
-	// the gate is registered before the wait, so a test that ends the track right
-	// after seeing it start can never close a channel nobody waits on yet
 	f.playTrackFn = func(ctx context.Context, gen uint64, tr Track) error {
 		f.started <- tr.ID
 		ch := make(chan struct{})
@@ -80,8 +78,8 @@ func newFake(t *testing.T) *fake {
 	return f
 }
 
-// endTrack finishes a playing track. It waits for the track to register, so the
-// test never races the player's goroutine.
+// endTrack finishes a playing track. It waits for the track to register, so the test
+// never races the player's goroutine.
 func (f *fake) endTrack(id uint64) {
 	f.mu.Lock()
 	if ch, ok := f.release[id]; ok {
@@ -130,19 +128,6 @@ func (f *fake) failSound(title string, err error) {
 	f.serrs[title] = err
 }
 
-// ids returns the ids of the tracks that began playing, in play order.
-func (f *fake) ids() []uint64 {
-	var out []uint64
-	for {
-		select {
-		case id := <-f.started:
-			out = append(out, id)
-		default:
-			return out
-		}
-	}
-}
-
 func (f *fake) nextSound(t *testing.T) string {
 	t.Helper()
 	select {
@@ -183,221 +168,121 @@ func await(t *testing.T, what string, cond func() bool) {
 
 func track(title string) Track { return Track{Title: title, URL: "https://x/" + title} }
 
-func titlesOf(ts []Track) []string {
-	out := make([]string, 0, len(ts))
-	for _, t := range ts {
-		out = append(out, t.Title)
+// --- snapshot helpers -------------------------------------------------------
+
+// lineupTitles is every entry in absolute order.
+func lineupTitles(s QueueSnapshot) []string {
+	out := make([]string, 0, len(s.Entries))
+	for _, e := range s.Entries {
+		out = append(out, e.Title)
 	}
 	return out
 }
 
-func TestEnqueuePlaysInFIFOOrder(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.Enqueue(track("a")))
-	require.NoError(t, p.EnqueueMany([]Track{track("b"), track("c")}))
-	await(t, "a playing", func() bool { return p.currentTitle() == "a" })
-
-	s := p.QueueSnapshot()
-	require.Equal(t, "a", s.Current.Title)
-	// playing track is position 1, so b is 2 and c is 3
-	require.Equal(t, []string{"b", "c"}, titlesOf(s.Upcoming))
-	require.NoError(t, p.JumpTo(2))
-	await(t, "b playing", func() bool { return p.currentTitle() == "b" })
+func lineupStates(s QueueSnapshot) []QueueState {
+	out := make([]QueueState, 0, len(s.Entries))
+	for _, e := range s.Entries {
+		out = append(out, e.State)
+	}
+	return out
 }
 
-func TestEnqueueManyEmptyIsNoop(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.EnqueueMany(nil))
+// playing is the absolute position currently playing, 0 when idle.
+func playing(p *fake) int { return p.QueueSnapshot().CurrentIndex }
 
-	s := p.QueueSnapshot()
-	require.Nil(t, s.Current)
-	require.Empty(t, s.Upcoming)
-	require.Empty(t, p.ids())
+func awaitPlaying(t *testing.T, p *fake, title string) {
+	t.Helper()
+	await(t, title, func() bool { return p.currentTitle() == title })
 }
 
-func TestEnqueueManyAssignsStableIDs(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("a"), track("b")}))
+// --- lineup retention -------------------------------------------------------
 
-	s := p.QueueSnapshot()
-	require.Equal(t, uint64(1), s.Current.ID)
-	// duplicates are kept and never share an id
-	require.Equal(t, []uint64{2, 3}, []uint64{s.Upcoming[0].ID, s.Upcoming[1].ID})
-}
-
-func TestNaturalCompletionAdvancesOnce(t *testing.T) {
+func TestLineupKeepsEveryTrackForThePlayersLifetime(t *testing.T) {
 	p := newFake(t)
 	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
-	await(t, "a playing", func() bool { return p.currentTitle() == "a" })
+	awaitPlaying(t, p, "a")
 
-	p.endTrack(1)
-	await(t, "b playing", func() bool { return p.currentTitle() == "b" })
-	await(t, "b in history", func() bool { return len(p.QueueSnapshot().History) == 1 })
-
-	p.endTrack(2)
-	await(t, "c playing", func() bool { return p.currentTitle() == "c" })
-	p.endTrack(3)
-
-	await(t, "idle", func() bool { return p.Current() == nil })
+	// the full lineup is visible from the start, with the cursor on position 1
 	s := p.QueueSnapshot()
-	require.Empty(t, s.Upcoming)
-	require.Equal(t, []string{"a", "b", "c"}, titlesOf(s.History))
-}
-
-func TestTrackFailureStillAdvances(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
-	await(t, "a playing", func() bool { return p.currentTitle() == "a" })
-	p.failTrack(1, errors.New("boom"))
+	assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(s))
+	assert.Equal(t, 1, s.CurrentIndex)
 
 	p.endTrack(1)
-	await(t, "b playing", func() bool { return p.currentTitle() == "b" })
-	require.Equal(t, []string{"a"}, titlesOf(p.QueueSnapshot().History))
-}
-
-func TestSkip(t *testing.T) {
-	t.Run("skips to the next track", func(t *testing.T) {
-		p := newFake(t)
-		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
-		await(t, "a playing", func() bool { return p.currentTitle() == "a" })
-
-		require.NoError(t, p.SkipNext())
-		await(t, "b playing", func() bool { return p.currentTitle() == "b" })
-		require.Equal(t, []string{"a"}, titlesOf(p.QueueSnapshot().History))
-	})
-
-	t.Run("last track leaves the player idle", func(t *testing.T) {
-		p := newFake(t)
-		require.NoError(t, p.Enqueue(track("a")))
-		require.NoError(t, p.SkipNext())
-		await(t, "idle", func() bool { return p.Current() == nil })
-		require.Empty(t, p.QueueSnapshot().Upcoming)
-	})
-
-	t.Run("idle player", func(t *testing.T) {
-		p := newFake(t)
-		require.ErrorIs(t, p.SkipNext(), ErrNothingPlaying)
-	})
-}
-
-func TestPrevious(t *testing.T) {
-	t.Run("returns to history and keeps the current track queued", func(t *testing.T) {
-		p := newFake(t)
-		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
-		await(t, "a", func() bool { return p.currentTitle() == "a" })
-		p.endTrack(1)
-		await(t, "b", func() bool { return p.currentTitle() == "b" })
-
-		require.NoError(t, p.Previous())
-		await(t, "a again", func() bool { return p.currentTitle() == "a" })
-		require.Equal(t, []string{"b", "c"}, titlesOf(p.QueueSnapshot().Upcoming))
-
-		// the track we came from is playable again
-		require.NoError(t, p.SkipNext())
-		await(t, "b again", func() bool { return p.currentTitle() == "b" })
-	})
-
-	t.Run("empty history", func(t *testing.T) {
-		p := newFake(t)
-		require.NoError(t, p.Enqueue(track("a")))
-		await(t, "a", func() bool { return p.currentTitle() == "a" })
-		require.ErrorIs(t, p.Previous(), ErrNoHistory)
-		require.Equal(t, "a", p.currentTitle())
-	})
-
-	t.Run("idle player with history", func(t *testing.T) {
-		p := newFake(t)
-		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
-		await(t, "a", func() bool { return p.currentTitle() == "a" })
-		p.endTrack(1)
-		await(t, "b", func() bool { return p.currentTitle() == "b" })
-		p.endTrack(2)
-		await(t, "idle", func() bool { return p.Current() == nil })
-
-		require.NoError(t, p.Previous())
-		await(t, "b again", func() bool { return p.currentTitle() == "b" })
-	})
-}
-
-func TestJump(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c"), track("d")}))
-	await(t, "a playing", func() bool { return p.currentTitle() == "a" })
-
-	t.Run("out of range", func(t *testing.T) {
-		require.ErrorIs(t, p.JumpTo(0), ErrInvalidPosition)
-		require.ErrorIs(t, p.JumpTo(-1), ErrInvalidPosition)
-		require.ErrorIs(t, p.JumpTo(99), ErrInvalidPosition)
-		// a failed jump left the queue exactly as it was
-		require.Equal(t, "a", p.currentTitle())
-		require.Len(t, p.QueueSnapshot().Upcoming, 3)
-	})
-
-	t.Run("current position is a noop", func(t *testing.T) {
-		require.NoError(t, p.JumpTo(1))
-		time.Sleep(20 * time.Millisecond)
-		require.Equal(t, "a", p.currentTitle())
-		require.Len(t, p.QueueSnapshot().Upcoming, 3)
-	})
-
-	t.Run("jumps forward and drops the skipped tracks", func(t *testing.T) {
-		require.NoError(t, p.JumpTo(3))
-		await(t, "c playing", func() bool { return p.currentTitle() == "c" })
-		require.Equal(t, []string{"d"}, titlesOf(p.QueueSnapshot().Upcoming))
-		require.Equal(t, []string{"a"}, titlesOf(p.QueueSnapshot().History))
-
-		// the stale track's goroutine must not advance the queue when it unwinds
-		time.Sleep(20 * time.Millisecond)
-		require.Equal(t, "c", p.currentTitle())
-	})
-}
-
-func TestJumpWhileIdle(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
-	require.ErrorIs(t, p.JumpTo(3), ErrInvalidPosition)
-
-	await(t, "a", func() bool { return p.currentTitle() == "a" })
-	p.endTrack(1)
-	await(t, "b", func() bool { return p.currentTitle() == "b" })
+	awaitPlaying(t, p, "b")
 	p.endTrack(2)
-	await(t, "idle", func() bool { return p.Current() == nil })
+	awaitPlaying(t, p, "c")
 
-	// idle: the first queued track is position 1
+	// a played track is still there, at its original absolute position
+	s = p.QueueSnapshot()
+	assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(s), "playback never removes entries")
+	assert.Equal(t, 3, s.CurrentIndex, "positions do not shift as playback advances")
+	assert.Equal(t, []QueueState{StatePlayed, StatePlayed, StatePlaying}, lineupStates(s))
+}
+
+func TestReachingTheEndKeepsTheLineup(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+	p.endTrack(1)
+	awaitPlaying(t, p, "b")
+	p.endTrack(2)
+
+	await(t, "idle at the end", func() bool { return playing(p) == 0 })
+	s := p.QueueSnapshot()
+	assert.Equal(t, []string{"a", "b"}, lineupTitles(s), "an idle player still shows its lineup")
+	assert.Equal(t, []QueueState{StatePlayed, StatePlayed}, lineupStates(s))
+}
+
+func TestAppendingNeverRenumbers(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+	p.endTrack(1)
+	awaitPlaying(t, p, "b")
+
+	require.NoError(t, p.EnqueueMany([]Track{track("c")}))
+	s := p.QueueSnapshot()
+	assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(s))
+	// a is still position 1
+	assert.Equal(t, "a", s.Entry(1).Title)
+	assert.Equal(t, "b", s.Entry(2).Title)
+}
+
+func TestDuplicateTracksAreSeparateEntries(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("a"), track("a")}))
+
+	s := p.QueueSnapshot()
+	require.Len(t, s.Entries, 3)
+	assert.Equal(t, "a", s.Entry(1).Title)
+	assert.Equal(t, "a", s.Entry(2).Title)
+	assert.Equal(t, "a", s.Entry(3).Title)
+	assert.NotEqual(t, s.Entry(1).Track.ID, s.Entry(2).Track.ID, "each entry keeps its own identity")
+	assert.NotEqual(t, s.Entry(2).Track.ID, s.Entry(3).Track.ID)
+}
+
+func TestEnqueueAfterTheEndPlaysTheNewEntries(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+	p.endTrack(1)
+	awaitPlaying(t, p, "b")
+	p.endTrack(2)
+	await(t, "idle", func() bool { return playing(p) == 0 })
+
+	// appending after the lineup finished continues where it left off
 	require.NoError(t, p.EnqueueMany([]Track{track("x"), track("y")}))
-	await(t, "x", func() bool { return p.currentTitle() == "x" })
-	require.NoError(t, p.JumpTo(2))
-	await(t, "y", func() bool { return p.currentTitle() == "y" })
-}
-
-func TestSnapshotIsACopy(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
-	await(t, "a", func() bool { return p.currentTitle() == "a" })
+	awaitPlaying(t, p, "x")
 
 	s := p.QueueSnapshot()
-	s.Upcoming[0].Title = "hacked"
-	s.Upcoming = append(s.Upcoming, track("injected"))
-	*s.Current = track("hacked")
-
-	fresh := p.QueueSnapshot()
-	require.Equal(t, []string{"b", "c"}, titlesOf(fresh.Upcoming))
-	require.Equal(t, "a", fresh.Current.Title)
+	assert.Equal(t, []string{"a", "b", "x", "y"}, lineupTitles(s))
+	assert.Equal(t, 3, s.CurrentIndex, "playback resumes at the newly appended position, not position 1")
 }
 
-func TestCurrentIsACopy(t *testing.T) {
+func TestLongSessionKeepsEveryLineupEntry(t *testing.T) {
 	p := newFake(t)
-	require.NoError(t, p.Enqueue(track("a")))
-	await(t, "a", func() bool { return p.currentTitle() == "a" })
+	const total = historyMax + 20
 
-	c := p.Current()
-	c.Title = "hacked"
-	require.Equal(t, "a", p.currentTitle())
-}
-
-func TestHistoryIsBounded(t *testing.T) {
-	p := newFake(t)
-	total := historyMax + 10
 	tracks := make([]Track, 0, total)
 	for i := range total {
 		tracks = append(tracks, track(fmt.Sprint(i)))
@@ -405,23 +290,261 @@ func TestHistoryIsBounded(t *testing.T) {
 	require.NoError(t, p.EnqueueMany(tracks))
 
 	for i := range total {
-		require.NoError(t, awaitPlaying(t, p, fmt.Sprint(i)))
+		awaitPlaying(t, p, fmt.Sprint(i))
 		p.endTrack(uint64(i + 1))
 	}
-	await(t, "idle", func() bool { return p.Current() == nil })
+	await(t, "idle", func() bool { return playing(p) == 0 })
 
 	s := p.QueueSnapshot()
-	require.Len(t, s.History, historyMax)
-	require.Equal(t, fmt.Sprint(total-historyMax), s.History[0].Title)
+	assert.Len(t, s.Entries, total, "the history limit must not truncate the visible lineup")
+	assert.Equal(t, fmt.Sprint(0), s.Entry(1).Title, "the oldest entry is still addressable")
 }
 
-// awaitPlaying waits until title is the playing track, skipping any that started
-// while we were not looking.
-func awaitPlaying(t *testing.T, p *fake, title string) error {
-	t.Helper()
-	await(t, title, func() bool { return p.currentTitle() == title })
-	return nil
+// --- navigation -------------------------------------------------------------
+
+func TestSkipNext(t *testing.T) {
+	t.Run("moves to the next absolute position", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+
+		require.NoError(t, p.SkipNext())
+		awaitPlaying(t, p, "b")
+		assert.Equal(t, 2, playing(p))
+		// the entry it left stays, marked as skipped rather than played
+		s := p.QueueSnapshot()
+		assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(s))
+		assert.Equal(t, []QueueState{StateSkipped, StatePlaying, StateUpcoming}, lineupStates(s))
+	})
+
+	t.Run("at the end it fails and keeps the lineup", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+		require.NoError(t, p.SkipNext())
+		awaitPlaying(t, p, "b")
+
+		assert.ErrorIs(t, p.SkipNext(), ErrNoNextTrack)
+		assert.Equal(t, []string{"a", "b"}, lineupTitles(p.QueueSnapshot()))
+	})
+
+	t.Run("idle player", func(t *testing.T) {
+		p := newFake(t)
+		assert.ErrorIs(t, p.SkipNext(), ErrNothingPlaying)
+	})
 }
+
+func TestPrevious(t *testing.T) {
+	t.Run("selects the preceding absolute position", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		awaitPlaying(t, p, "b")
+
+		require.NoError(t, p.Previous())
+		awaitPlaying(t, p, "a")
+		assert.Equal(t, 1, playing(p))
+		assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(p.QueueSnapshot()), "nothing is removed")
+	})
+
+	t.Run("from position 1 it fails without changing state", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.Enqueue(track("a")))
+		awaitPlaying(t, p, "a")
+
+		assert.ErrorIs(t, p.Previous(), ErrNoPreviousTrack)
+		assert.Equal(t, "a", p.currentTitle())
+		assert.Equal(t, 1, playing(p))
+	})
+
+	t.Run("idle at the end resumes from the last entry", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		awaitPlaying(t, p, "b")
+		p.endTrack(2)
+		await(t, "idle", func() bool { return playing(p) == 0 })
+
+		require.NoError(t, p.Previous())
+		awaitPlaying(t, p, "b")
+		assert.Equal(t, 2, playing(p))
+	})
+
+	t.Run("follows absolute adjacency after a jump", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c"), track("d")}))
+		awaitPlaying(t, p, "a")
+
+		// jump to 4, then previous must be 3 - not wherever playback came from
+		require.NoError(t, p.JumpTo(4))
+		awaitPlaying(t, p, "d")
+		require.NoError(t, p.Previous())
+		awaitPlaying(t, p, "c")
+		assert.Equal(t, 3, playing(p))
+	})
+}
+
+func TestJumpToAbsolutePositions(t *testing.T) {
+	t.Run("backwards to a played track", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		awaitPlaying(t, p, "b")
+		p.endTrack(2)
+		awaitPlaying(t, p, "c")
+
+		require.NoError(t, p.JumpTo(1))
+		awaitPlaying(t, p, "a")
+		s := p.QueueSnapshot()
+		assert.Equal(t, 1, s.CurrentIndex)
+		assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(s), "the lineup is intact")
+		// b really played; c is the one the jump walked away from, so it is skipped
+		assert.Equal(t, []QueueState{StatePlaying, StatePlayed, StateSkipped}, lineupStates(s))
+	})
+
+	t.Run("forwards past the end of the unplayed suffix", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c"), track("d"), track("e")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		p.endTrack(2)
+		awaitPlaying(t, p, "c")
+
+		require.NoError(t, p.JumpTo(5))
+		awaitPlaying(t, p, "e")
+		assert.Equal(t, 5, playing(p))
+		assert.Equal(t, 5, p.QueueSnapshot().Len())
+	})
+
+	t.Run("current position is a no-op", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+
+		require.NoError(t, p.JumpTo(1))
+		time.Sleep(20 * time.Millisecond)
+		assert.Equal(t, "a", p.currentTitle())
+		assert.Equal(t, []QueueState{StatePlaying, StateUpcoming}, lineupStates(p.QueueSnapshot()))
+	})
+
+	t.Run("out of range leaves everything intact", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+
+		for _, bad := range []int{0, -1, 3, 99} {
+			assert.ErrorIs(t, p.JumpTo(bad), ErrInvalidPosition)
+		}
+		assert.Equal(t, "a", p.currentTitle(), "a failed jump does not interrupt playback")
+		assert.Equal(t, []string{"a", "b"}, lineupTitles(p.QueueSnapshot()))
+	})
+
+	t.Run("the replaced generation cannot advance the cursor", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+
+		// the old track ends right as the jump replaces it
+		p.endTrack(1)
+		require.NoError(t, p.JumpTo(3))
+		awaitPlaying(t, p, "c")
+
+		time.Sleep(50 * time.Millisecond)
+		assert.Equal(t, 3, playing(p), "the stale completion did not advance the cursor again")
+	})
+}
+
+func TestNaturalCompletionAdvancesExactlyOnce(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+	awaitPlaying(t, p, "a")
+
+	p.endTrack(1)
+	awaitPlaying(t, p, "b")
+	await(t, "b played", func() bool { return lineupStates(p.QueueSnapshot())[0] == StatePlayed })
+	p.endTrack(2)
+	awaitPlaying(t, p, "c")
+	p.endTrack(3)
+	await(t, "idle at the end", func() bool { return playing(p) == 0 })
+
+	assert.Equal(t, []QueueState{StatePlayed, StatePlayed, StatePlayed}, lineupStates(p.QueueSnapshot()))
+	assert.Equal(t, 3, p.QueueSnapshot().Len())
+}
+
+func TestTrackFailureStillAdvances(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+	p.failTrack(1, errors.New("boom"))
+
+	p.endTrack(1)
+	awaitPlaying(t, p, "b")
+	assert.Equal(t, 2, playing(p), "the queue did not get stuck on the failed track")
+}
+
+// --- snapshot ---------------------------------------------------------------
+
+func TestSnapshotIsACopy(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+
+	s := p.QueueSnapshot()
+	s.Entries[0].Title = "hacked"
+	s.Entries = append(s.Entries, QueueEntry{Track: track("injected")})
+
+	fresh := p.QueueSnapshot()
+	require.Len(t, fresh.Entries, 2, "a snapshot cannot grow the live lineup")
+	assert.Equal(t, "a", fresh.Entry(1).Title)
+}
+
+func TestCurrentIsACopy(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.Enqueue(track("a")))
+	awaitPlaying(t, p, "a")
+
+	c := p.Current()
+	c.Title = "hacked"
+	assert.Equal(t, "a", p.currentTitle())
+}
+
+func TestEntryOutOfRange(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.Enqueue(track("a")))
+	s := p.QueueSnapshot()
+	assert.Nil(t, s.Entry(0))
+	assert.Nil(t, s.Entry(2))
+	assert.NotNil(t, s.Entry(1))
+	assert.Equal(t, 1, s.Len())
+}
+
+func TestHistoryIsBounded(t *testing.T) {
+	p := newFake(t)
+	const total = historyMax + 10
+
+	tracks := make([]Track, 0, total)
+	for i := range total {
+		tracks = append(tracks, track(fmt.Sprint(i)))
+	}
+	require.NoError(t, p.EnqueueMany(tracks))
+
+	for i := range total {
+		awaitPlaying(t, p, fmt.Sprint(i))
+		p.endTrack(uint64(i + 1))
+	}
+	await(t, "idle", func() bool { return playing(p) == 0 })
+
+	p.Player.mu.Lock()
+	history := len(p.history)
+	p.Player.mu.Unlock()
+	assert.Equal(t, historyMax, history, "history stays bounded")
+	assert.Equal(t, total, p.QueueSnapshot().Len(), "without evicting lineup entries")
+}
+
+// --- pause ------------------------------------------------------------------
 
 func TestEnqueuePreservesManualPause(t *testing.T) {
 	t.Run("single track", func(t *testing.T) {
@@ -435,9 +558,8 @@ func TestEnqueuePreservesManualPause(t *testing.T) {
 		p := newFake(t)
 		require.NoError(t, p.TogglePause())
 		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
-		require.True(t, p.Paused(), "queueing a batch must not resume paused music")
-		// the queue still grew
-		require.Len(t, p.QueueSnapshot().Upcoming, 1)
+		require.True(t, p.Paused())
+		require.Equal(t, 2, p.QueueSnapshot().Len(), "the batch still landed")
 	})
 
 	t.Run("enqueue while sound suspended", func(t *testing.T) {
@@ -453,7 +575,7 @@ func TestEnqueuePreservesManualPause(t *testing.T) {
 
 		p.endSound("boom")
 		await(t, "sounds drained", func() bool { return p.QueueSnapshot().SoundWait == 0 })
-		require.False(t, p.Paused(), "draining sounds does not create a pause either")
+		require.False(t, p.Paused())
 	})
 
 	t.Run("a drained sound backlog does not clear a manual pause", func(t *testing.T) {
@@ -469,19 +591,19 @@ func TestEnqueuePreservesManualPause(t *testing.T) {
 	t.Run("navigation does not toggle the pause", func(t *testing.T) {
 		p := newFake(t)
 		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
-		await(t, "a", func() bool { return p.currentTitle() == "a" })
+		awaitPlaying(t, p, "a")
 
 		require.NoError(t, p.TogglePause())
 		require.NoError(t, p.SkipNext())
 		require.NoError(t, p.Previous())
-		require.Error(t, p.JumpTo(99)) // rejected, and still no toggle
-		require.True(t, p.Paused(), "no queue operation clears the manual pause")
+		require.Error(t, p.JumpTo(99))
+		require.True(t, p.Paused())
 	})
 
 	t.Run("explicit resume clears it", func(t *testing.T) {
 		p := newFake(t)
 		require.NoError(t, p.Enqueue(track("a")))
-		await(t, "a", func() bool { return p.currentTitle() == "a" })
+		awaitPlaying(t, p, "a")
 
 		require.NoError(t, p.TogglePause())
 		require.NoError(t, p.TogglePause())
@@ -493,7 +615,7 @@ func TestEnqueuePreservesManualPause(t *testing.T) {
 func TestManualPauseIsIndependentOfSounds(t *testing.T) {
 	p := newFake(t)
 	require.NoError(t, p.Enqueue(track("a")))
-	await(t, "a", func() bool { return p.currentTitle() == "a" })
+	awaitPlaying(t, p, "a")
 
 	require.NoError(t, p.TogglePause())
 	require.True(t, p.Paused())
@@ -503,20 +625,130 @@ func TestManualPauseIsIndependentOfSounds(t *testing.T) {
 	// a sound must not clear a manual pause
 	require.NoError(t, p.TogglePause())
 	require.NoError(t, p.EnqueueSound(SoundTrack{Title: "boom"}))
-	require.Equal(t, "boom", p.nextSound(t))
+	p.nextSound(t)
 	p.endSound("boom")
-	await(t, "sounds drained", func() bool { return p.QueueSnapshot().SoundWait == 0 })
+	await(t, "sound drained", func() bool { return p.QueueSnapshot().SoundWait == 0 })
 	require.True(t, p.Paused())
 }
 
-func TestClose(t *testing.T) {
+// --- sounds -----------------------------------------------------------------
+
+func TestSoundsDoNotTouchTheMusicQueue(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.Enqueue(track("song")))
+	require.NoError(t, p.EnqueueSound(SoundTrack{Title: "boom"}))
+	p.endSound("boom")
+
+	s := p.QueueSnapshot()
+	assert.Equal(t, []string{"song"}, lineupTitles(s), "sounds never enter the music lineup")
+	assert.Equal(t, 1, s.CurrentIndex)
+}
+
+func TestSoundQueueFIFO(t *testing.T) {
+	p := newFake(t)
+	first := SoundSequence{Tracks: []SoundTrack{{Title: "a1"}, {Title: "a2"}}}
+	second := SoundSequence{Tracks: []SoundTrack{{Title: "b1"}, {Title: "b2"}, {Title: "b3"}}}
+
+	require.NoError(t, p.EnqueueSoundSequence(first))
+	require.NoError(t, p.EnqueueSoundSequence(second))
+
+	require.Equal(t, "a1", p.nextSound(t))
+	p.endSound("a1")
+	require.Equal(t, "a2", p.nextSound(t))
+	p.endSound("a2")
+
+	// nothing from the second sequence may start before the first one finished
+	require.Equal(t, "b1", p.nextSound(t))
+	p.endSound("b1")
+	require.Equal(t, "b2", p.nextSound(t))
+	p.endSound("b2")
+	require.Equal(t, "b3", p.nextSound(t))
+	p.endSound("b3")
+
+	await(t, "sound backlog drained", func() bool { return !p.soundSuspended() })
+	require.Zero(t, p.QueueSnapshot().SoundWait)
+}
+
+func TestMusicStaysSuspendedBetweenQueuedSequences(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.Enqueue(track("song")))
+	require.NoError(t, p.EnqueueSoundSequence(SoundSequence{Tracks: []SoundTrack{{Title: "a"}}}))
+	require.NoError(t, p.EnqueueSoundSequence(SoundSequence{Tracks: []SoundTrack{{Title: "b"}}}))
+
+	require.True(t, p.soundSuspended())
+	require.Equal(t, "a", p.nextSound(t))
+	p.endSound("a")
+	require.Equal(t, "b", p.nextSound(t))
+	require.True(t, p.soundSuspended())
+	p.endSound("b")
+
+	await(t, "suspension released", func() bool { return !p.soundSuspended() })
+	require.Equal(t, "song", p.currentTitle())
+	require.False(t, p.Paused())
+}
+
+func TestSingleSoundIsAOneItemSequence(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueSound(SoundTrack{Title: "one"}))
+	require.Equal(t, "one", p.nextSound(t))
+	p.endSound("one")
+	await(t, "drained", func() bool { return !p.soundSuspended() })
+}
+
+func TestEnqueueSoundSequenceValidation(t *testing.T) {
+	p := newFake(t)
+	require.ErrorIs(t, p.EnqueueSoundSequence(SoundSequence{}), ErrEmptySoundSequence)
+
+	tooLong := make([]SoundTrack, MaxSoundsPerSequence+1)
+	require.ErrorIs(t, p.EnqueueSoundSequence(SoundSequence{Tracks: tooLong}), ErrSoundSequenceTooLong)
+
+	var rejected error
+	for i := range maxSoundRequests + 8 {
+		if err := p.EnqueueSound(SoundTrack{Title: fmt.Sprint(i)}); err != nil {
+			rejected = err
+		}
+	}
+	require.ErrorIs(t, rejected, ErrSoundQueueFull)
+	require.LessOrEqual(t, p.QueueSnapshot().SoundWait, maxSoundRequests)
+}
+
+func TestEnqueueSoundSequenceCopiesInput(t *testing.T) {
+	p := newFake(t)
+	seq := SoundSequence{Tracks: []SoundTrack{{Title: "kept"}}}
+	require.NoError(t, p.EnqueueSoundSequence(seq))
+
+	seq.Tracks[0].Title = "changed"
+	seq.Tracks = append(seq.Tracks, SoundTrack{Title: "injected"})
+
+	require.Equal(t, "kept", p.nextSound(t))
+	p.endSound("kept")
+}
+
+func TestSoundFailureDoesNotStrandMusic(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueSoundSequence(SoundSequence{Tracks: []SoundTrack{
+		{Title: "bad"}, {Title: "good"},
+	}}))
+	p.failSound("bad", errors.New("no such file"))
+
+	require.Equal(t, "bad", p.nextSound(t))
+	p.endSound("bad")
+	require.Equal(t, "good", p.nextSound(t))
+	p.endSound("good")
+
+	await(t, "suspension released", func() bool { return !p.soundSuspended() })
+}
+
+// --- lifecycle --------------------------------------------------------------
+
+func TestCloseIsIdempotent(t *testing.T) {
 	p := newFake(t)
 	require.NoError(t, p.Enqueue(track("a")))
 	require.NoError(t, p.EnqueueSound(SoundTrack{Title: "boom"}))
 	p.nextSound(t)
 
 	require.NoError(t, p.Close())
-	require.NoError(t, p.Close()) // idempotent
+	require.NoError(t, p.Close())
 
 	require.True(t, p.QueueSnapshot().Closed)
 	require.ErrorIs(t, p.Enqueue(track("b")), ErrClosed)
@@ -534,8 +766,8 @@ func TestCloseNeverDeletesCachedFiles(t *testing.T) {
 	require.NoError(t, os.WriteFile(shared, []byte("media"), 0o644))
 
 	p := newFake(t)
-	require.NoError(t, p.Enqueue(Track{Title: "cached", Filepath: shared}))
-	await(t, "playing", func() bool { return p.currentTitle() == "cached" })
+	require.NoError(t, p.EnqueueMany([]Track{{Title: "cached", Filepath: shared}, track("next")}))
+	awaitPlaying(t, p, "cached")
 
 	require.NoError(t, p.SkipNext())
 	require.NoError(t, p.Close())
@@ -562,8 +794,7 @@ func TestConcurrentEnqueueKeepsEveryTrack(t *testing.T) {
 	}
 	wg.Wait()
 
-	// one is playing, the rest are queued
-	require.Len(t, p.QueueSnapshot().Upcoming, workers*each-1)
+	assert.Equal(t, workers*each, p.QueueSnapshot().Len())
 }
 
 func TestConcurrentNavigationIsRaceFree(t *testing.T) {
@@ -599,138 +830,20 @@ func TestConcurrentCompletionVersusSkip(t *testing.T) {
 	}
 	wg.Wait()
 
-	// whatever the interleaving was, the queue is still consistent
-	s := p.QueueSnapshot()
-	require.LessOrEqual(t, len(s.History)+len(s.Upcoming), 50)
-	if s.Current != nil {
-		require.NotEmpty(t, s.Upcoming)
-	}
+	// whatever the interleaving was, the lineup is still whole
+	assert.Equal(t, 50, p.QueueSnapshot().Len())
 }
 
-func TestSoundQueueFIFO(t *testing.T) {
-	p := newFake(t)
-	first := SoundSequence{Tracks: []SoundTrack{{Title: "a1"}, {Title: "a2"}}}
-	second := SoundSequence{Tracks: []SoundTrack{{Title: "b1"}, {Title: "b2"}, {Title: "b3"}}}
-
-	require.NoError(t, p.EnqueueSoundSequence(first))
-	require.NoError(t, p.EnqueueSoundSequence(second))
-	// the worker may already have taken the first one; the ordering below is what
-	// proves the two requests were kept apart
-	require.LessOrEqual(t, p.QueueSnapshot().SoundWait, 2)
-
-	require.Equal(t, "a1", p.nextSound(t))
-	p.endSound("a1")
-	require.Equal(t, "a2", p.nextSound(t))
-	p.endSound("a2")
-
-	// nothing from the second sequence may start before the first one finished
-	require.Equal(t, "b1", p.nextSound(t))
-	p.endSound("b1")
-	require.Equal(t, "b2", p.nextSound(t))
-	p.endSound("b2")
-	require.Equal(t, "b3", p.nextSound(t))
-	p.endSound("b3")
-
-	await(t, "sound backlog drained", func() bool { return !p.soundSuspended() })
-	require.Zero(t, p.QueueSnapshot().SoundWait)
-}
-
-func TestMusicStaysSuspendedBetweenQueuedSequences(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.Enqueue(track("song")))
-	require.NoError(t, p.EnqueueSoundSequence(SoundSequence{Tracks: []SoundTrack{{Title: "a"}}}))
-	require.NoError(t, p.EnqueueSoundSequence(SoundSequence{Tracks: []SoundTrack{{Title: "b"}}}))
-
-	// suspended from the first enqueue, never released between the two
-	require.True(t, p.soundSuspended())
-	require.Equal(t, "a", p.nextSound(t))
-	p.endSound("a")
-	require.Equal(t, "b", p.nextSound(t))
-	require.True(t, p.soundSuspended())
-	p.endSound("b")
-
-	await(t, "suspension released", func() bool { return !p.soundSuspended() })
-	require.Equal(t, "song", p.currentTitle())
-	require.False(t, p.Paused())
-}
-
-func TestSingleSoundIsAOneItemSequence(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.EnqueueSound(SoundTrack{Title: "one"}))
-	require.Equal(t, "one", p.nextSound(t))
-	p.endSound("one")
-	await(t, "drained", func() bool { return !p.soundSuspended() })
-}
-
-func TestEnqueueSoundSequenceValidation(t *testing.T) {
-	p := newFake(t)
-	require.ErrorIs(t, p.EnqueueSoundSequence(SoundSequence{}), ErrEmptySoundSequence)
-
-	tooLong := make([]SoundTrack, MaxSoundsPerSequence+1)
-	require.ErrorIs(t, p.EnqueueSoundSequence(SoundSequence{Tracks: tooLong}), ErrSoundSequenceTooLong)
-
-	// once the backlog is full, new requests are rejected - never silently swapped
-	// for one that was already accepted. The worker drains as we go, so we only
-	// assert the bound and the rejection.
-	var rejected error
-	for i := range maxSoundRequests + 8 {
-		err := p.EnqueueSound(SoundTrack{Title: fmt.Sprint(i)})
-		if err != nil {
-			rejected = err
-		}
-	}
-	require.ErrorIs(t, rejected, ErrSoundQueueFull)
-	require.LessOrEqual(t, p.QueueSnapshot().SoundWait, maxSoundRequests)
-}
-
-func TestEnqueueSoundSequenceCopiesInput(t *testing.T) {
-	p := newFake(t)
-	seq := SoundSequence{Tracks: []SoundTrack{{Title: "kept"}}}
-	require.NoError(t, p.EnqueueSoundSequence(seq))
-
-	seq.Tracks[0].Title = "changed"
-	seq.Tracks = append(seq.Tracks, SoundTrack{Title: "injected"})
-
-	require.Equal(t, "kept", p.nextSound(t))
-	p.endSound("kept")
-}
-
-func TestSoundFailureDoesNotStrandMusic(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.EnqueueSoundSequence(SoundSequence{Tracks: []SoundTrack{
-		{Title: "bad"}, {Title: "good"},
-	}}))
-	p.failSound("bad", errors.New("no such file"))
-
-	require.Equal(t, "bad", p.nextSound(t))
-	p.endSound("bad")
-	require.Equal(t, "good", p.nextSound(t))
-	p.endSound("good")
-
-	await(t, "suspension released", func() bool { return !p.soundSuspended() })
-}
-
-func TestSoundsDoNotTouchTheMusicQueue(t *testing.T) {
-	p := newFake(t)
-	require.NoError(t, p.Enqueue(track("song")))
-	require.NoError(t, p.EnqueueSound(SoundTrack{Title: "boom"}))
-	p.endSound("boom")
-
-	s := p.QueueSnapshot()
-	require.Equal(t, "song", s.Current.Title)
-	require.Empty(t, s.History)
-	require.Empty(t, s.Upcoming)
-}
-
-// The real playTrack refuses to write anywhere when there is no connection. It must
-// still advance the queue rather than wedge on the first track.
 func TestPlaybackWithoutVoiceConnectionStillAdvances(t *testing.T) {
 	p := NewPlayer()
 	t.Cleanup(func() { _ = p.Close() })
 	require.NoError(t, p.EnqueueMany([]Track{{Title: "a"}, {Title: "b"}}))
 
-	await(t, "advanced past both", func() bool { return len(p.QueueSnapshot().History) == 2 })
-	assert.Equal(t, []string{"a", "b"}, titlesOf(p.QueueSnapshot().History))
+	await(t, "advanced past both", func() bool {
+		s := p.QueueSnapshot()
+		return len(s.Entries) == 2 && s.CurrentIndex == 0
+	})
+	assert.Equal(t, []string{"a", "b"}, lineupTitles(p.QueueSnapshot()))
 	assert.Nil(t, p.Current(), "the player is idle, not stuck")
 	assert.Equal(t, 2, len(p.ErrChan), "each failed track was reported once")
 }

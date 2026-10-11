@@ -321,17 +321,18 @@ func TestFailedSpeakingActivationIsRetried(t *testing.T) {
 
 func TestFailedSpeakingDeactivationIsRetried(t *testing.T) {
 	f := newOutputFixture(t)
-	require.NoError(t, f.Enqueue(Track{Title: "a", URL: "u"}))
+	require.NoError(t, f.EnqueueMany([]Track{{Title: "a"}, {Title: "b"}}))
 	s := f.runMusic("music")
 	defer s.stop()
 
 	f.awaitFrames("music", 1)
 	require.True(t, f.conn.speakingIsOn())
 
-	// the release fails; the cached state must not claim it went through
+	// a pause ends the output, and its release fails: the cached state must not
+	// claim it went through
 	f.conn.failSpeaking(1)
-	require.NoError(t, f.SkipNext())
-	await(t, "idle", func() bool { return f.Current() == nil })
+	require.NoError(t, f.TogglePause())
+	await(t, "the pause took effect", func() bool { return f.Paused() })
 
 	assert.True(t, f.conn.speakingIsOn(), "the flag is still on, so the release really failed")
 	assert.Equal(t, 1, f.conn.speakingFailures())
@@ -367,17 +368,58 @@ func TestStaleGenerationCannotDisableNewerSpeaking(t *testing.T) {
 	gen := f.currentGen()
 	f.mu.Lock()
 	f.gen = gen + 1
-	f.current = &Track{Title: "b"}
+	f.cursor++ // the lineup replacement a jump would produce
 	f.mu.Unlock()
 
 	assert.ErrorIs(t, s.exit(), errOutputLost)
 	assert.Equal(t, offs, f.conn.countSpeakingOff())
 }
 
+// --- pacing clock -----------------------------------------------------------
+
+func TestSuccessfulWriteAdvancesThePacingClock(t *testing.T) {
+	f := newOutputFixture(t)
+	require.NoError(t, f.Enqueue(Track{Title: "a", URL: "u"}))
+	f.unpace()
+
+	before := f.lastFrameSentAt()
+	require.NoError(t, f.submitFrame(context.Background(), f.conn, []byte("f1"), f.currentGen(), true))
+	assert.Greater(t, f.lastFrameSentAt(), before, "a frame that went out advances the clock")
+}
+
+func TestFailedWriteDoesNotAdvanceThePacingClock(t *testing.T) {
+	f := newOutputFixture(t)
+	require.NoError(t, f.Enqueue(Track{Title: "a", URL: "u"}))
+	f.unpace()
+
+	before := f.lastFrameSentAt()
+	f.conn.udp.failOnce(errors.New("connection reset by peer"))
+	require.Error(t, f.submitFrame(context.Background(), f.conn, []byte("f1"), f.currentGen(), true))
+
+	assert.Equal(t, before, f.lastFrameSentAt(),
+		"a frame that never went out must not reserve pacing time")
+	assert.Zero(t, f.countFrames("f1"), "and it was not recorded as sent")
+}
+
+func TestRepeatedWriteFailuresDoNotCauseABurst(t *testing.T) {
+	f := newOutputFixture(t)
+	require.NoError(t, f.Enqueue(Track{Title: "a", URL: "u"}))
+	f.unpace()
+
+	// three failures in a row: the clock must stay exactly where it was, so the next
+	// successful write still waits its turn instead of firing immediately
+	before := f.lastFrameSentAt()
+	for i := range 3 {
+		f.conn.udp.failOnce(errors.New("connection reset by peer"))
+		require.Error(t, f.submitFrame(context.Background(), f.conn, []byte("f"), f.currentGen(), true))
+		require.Equal(t, before, f.lastFrameSentAt(), "failure %d", i)
+	}
+}
+
 // --- SetVC contract ---------------------------------------------------------
 
 func TestSetVCLifecycle(t *testing.T) {
-	t.Run("assignment before playback", func(t *testing.T) {
+	t.Run("a fresh player takes its first connection", func(t *testing.T) {
 		p := NewPlayer()
 		t.Cleanup(func() { _ = p.Close() })
 		conn := newFakeConn(1)
@@ -387,22 +429,36 @@ func TestSetVCLifecycle(t *testing.T) {
 		assert.EqualValues(t, 42, id)
 	})
 
-	t.Run("replacement while idle", func(t *testing.T) {
+	t.Run("the same connection again is a no-op", func(t *testing.T) {
+		p := NewPlayer()
+		t.Cleanup(func() { _ = p.Close() })
+		conn := newFakeConn(1)
+		require.NoError(t, p.SetVC(conn, 42))
+		require.NoError(t, p.SetVC(conn, 42), "re-attaching the same connection is idempotent")
+		got, id := p.Conn()
+		assert.Same(t, voice.Conn(conn), got)
+		assert.EqualValues(t, 42, id)
+	})
+
+	t.Run("a different connection is refused", func(t *testing.T) {
 		p := NewPlayer()
 		t.Cleanup(func() { _ = p.Close() })
 		require.NoError(t, p.SetVC(newFakeConn(1), 1))
-		require.NoError(t, p.SetVC(newFakeConn(2), 2))
-		_, id := p.Conn()
-		assert.EqualValues(t, 2, id, "conn and vcid move together")
+		err := p.SetVC(newFakeConn(2), 2)
+		assert.ErrorIs(t, err, ErrConnectionTaken, "a player never swaps connections out from under its workers")
+
+		got, id := p.Conn()
+		assert.NotNil(t, got, "the original connection is still owned")
+		assert.EqualValues(t, 1, id, "conn and vcid move together or not at all")
 	})
 
-	t.Run("refused after shutdown", func(t *testing.T) {
+	t.Run("a closed player refuses any connection", func(t *testing.T) {
 		p := NewPlayer()
 		require.NoError(t, p.Close())
 		assert.ErrorIs(t, p.SetVC(newFakeConn(1), 1), ErrClosed)
 	})
 
-	t.Run("no worker keeps writing after replacement", func(t *testing.T) {
+	t.Run("no worker keeps writing to a rejected connection", func(t *testing.T) {
 		f := newOutputFixture(t)
 		first := f.conn
 		second := newFakeConn(4242)
@@ -410,12 +466,10 @@ func TestSetVCLifecycle(t *testing.T) {
 		require.NoError(t, f.Enqueue(Track{Title: "a", URL: "u"}))
 		s := f.runMusic("music")
 
-		// the documented contract: a connection change is a player replacement, not
-		// a field update, so the old player finishes on the old connection
-		require.NoError(t, f.SetVC(second, 7))
+		assert.ErrorIs(t, f.SetVC(second, 7), ErrConnectionTaken)
 		f.awaitFrames("music", 1)
 		assert.NotEmpty(t, first.frames(), "the running stream keeps its own connection")
-		assert.Empty(t, second.frames(), "and never writes to the new one mid-track")
+		assert.Empty(t, second.frames(), "and never writes to a connection it does not own")
 
 		s.stop()
 	})

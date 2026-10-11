@@ -13,6 +13,10 @@ sudo chown -R runner:runner /go/pkg/mod /home/runner/.cache
 
 cd /home/runner/actions-runner
 
+# restart: always reuses this container, so a stale .runner from the previous
+# boot makes config.sh refuse to start. Wipe it; --replace handles GitHub's side.
+rm -f .runner .credentials .credentials_rsa .credentials_ecdsa .svc
+
 REG_TOKEN=$(curl -fsSL -X POST \
     -H "Authorization: Bearer ${GITHUB_PAT}" \
     -H "Accept: application/vnd.github+json" \

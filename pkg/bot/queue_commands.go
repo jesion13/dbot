@@ -90,12 +90,15 @@ func runQueueCommand(c queueCommand, p queuePlayer) string {
 	}
 }
 
+// queueErrText turns a player error into something a user can act on.
 func queueErrText(err error, fallback string) string {
 	switch {
 	case errors.Is(err, player.ErrNothingPlaying):
 		return "nothing is playing"
-	case errors.Is(err, player.ErrNoHistory):
-		return "no previous track in history"
+	case errors.Is(err, player.ErrNoPreviousTrack):
+		return "there is no earlier track in the queue"
+	case errors.Is(err, player.ErrNoNextTrack):
+		return "there is no later track in the queue"
 	case errors.Is(err, player.ErrInvalidPosition):
 		return err.Error()
 	case errors.Is(err, player.ErrClosed):
@@ -108,51 +111,69 @@ func queueErrText(err error, fallback string) string {
 }
 
 func queueNowText(s player.QueueSnapshot, verb string) string {
-	if s.Current == nil {
-		return "the queue is now empty"
+	cur := s.Current()
+	if cur == nil {
+		return "the queue is finished"
 	}
-	return fmt.Sprintf("%s **%s**", verb, s.Current.Title)
+	return fmt.Sprintf("%s **%s**", verb, displayTitle(cur.Title))
 }
 
-// queueText renders the queue. Positions match JumpTo: the playing track is 1 and
-// the first upcoming track is 2; when idle the first queued track is 1. No local
-// paths and no sound requests are ever exposed.
+// displayTitle makes a title safe to put on one numbered line.
+//
+// Track metadata can carry newlines, tabs and runs of spaces - an imported title
+// often spans several lines. Rendered raw, one entry spills over several lines and
+// the numbering, the state marker and the message splitting all stop lining up. So
+// every whitespace run collapses to a single space, and a title that is nothing but
+// whitespace gets a placeholder rather than an apparently empty row.
+func displayTitle(title string) string {
+	one := strings.Join(strings.Fields(title), " ")
+	if one == "" {
+		return untitledTrack
+	}
+	return one
+}
+
+// untitledTrack stands in for a track whose title is empty or whitespace only.
+const untitledTrack = "(untitled)"
+
+// queueText renders the player's complete lineup with absolute 1-based positions.
+//
+// Every entry is shown, including tracks that already played: a position has to keep
+// meaning the same track, otherwise a number the user read minutes ago would point
+// somewhere else. The list is deliberately plain - just "N. Title" - because a
+// status column in front of the number read as stray formatting. The playing track
+// is marked by its title instead, so the numbers stay flush left and aligned.
+// queueText renders the player's complete lineup with absolute 1-based positions.
+//
+// Every entry is shown, including tracks that already played: a position has to keep
+// meaning the same track, otherwise a number the user read minutes ago would point
+// somewhere else. Nothing here exposes a filepath, a URL, or sound requests.
 func queueText(s player.QueueSnapshot) string {
 	if s.Closed {
 		return "the player is closed"
 	}
-	if s.Current == nil && len(s.Upcoming) == 0 {
-		return "nothing is playing and the queue is empty"
+	if len(s.Entries) == 0 {
+		return "nothing has been queued yet"
 	}
 
 	var b strings.Builder
-	if s.Current != nil {
-		fmt.Fprintf(&b, "**Now:** %s\n", s.Current.Title)
-	} else {
-		b.WriteString("**Now:** idle\n")
+	b.WriteString("Music queue")
+	if s.CurrentIndex == 0 {
+		b.WriteString(" (idle)")
 	}
 	if s.Paused {
-		b.WriteString("*(paused)*\n")
+		b.WriteString(" (paused)")
 	}
-
-	pos := 1
-	if s.Current != nil {
-		pos = 2
-	}
-	if len(s.Upcoming) == 0 {
-		b.WriteString("\nNothing queued after this.")
-		return b.String()
-	}
-	b.WriteString("\n**Up next:**")
-	for _, t := range s.Upcoming {
-		fmt.Fprintf(&b, "\n%d. %s", pos, t.Title)
-		pos++
+	for i, e := range s.Entries {
+		title := displayTitle(e.Title)
+		if i+1 == s.CurrentIndex {
+			title = "**" + title + "**"
+		}
+		fmt.Fprintf(&b, "\n%d. %s", i+1, title)
 	}
 	return b.String()
 }
 
-// cutAt splits s into the longest prefix of at most limit bytes that ends on a
-// rune boundary, and the remainder. Backing off to a rune boundary consumes fewer
 // than limit bytes, so the caller must advance by len(head), not by limit.
 func cutAt(s string, limit int) (head, rest string) {
 	if len(s) <= limit {

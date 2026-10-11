@@ -43,7 +43,7 @@ type fakeUDP struct {
 	failWith error
 }
 
-func (u fakeUDP) Write(b []byte) (int, error) {
+func (u *fakeUDP) Write(b []byte) (int, error) {
 	if u.closed.Load() {
 		return 0, net.ErrClosed
 	}
@@ -75,8 +75,10 @@ func (u fakeUDP) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-// failOnce makes the next frame write fail with err.
-func (u fakeUDP) failOnce(err error) {
+// failOnce makes the next frame write fail with err. Pointer receivers matter here:
+// a value receiver would silently mutate a copy and the injected failure would
+// never be seen.
+func (u *fakeUDP) failOnce(err error) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	u.failWith = err
@@ -248,7 +250,12 @@ type outputFixture struct {
 	*Player
 	conn *fakeConn
 	t    *testing.T
+	// trackDone lets a test end the playing track the way a real one ends.
+	trackDone chan struct{}
 }
+
+// finishTrack ends the currently playing track, so the player advances on its own.
+func (f *outputFixture) finishTrack() { f.trackDone <- struct{}{} }
 
 func newOutputFixture(t *testing.T) *outputFixture {
 	t.Helper()
@@ -257,16 +264,21 @@ func newOutputFixture(t *testing.T) *outputFixture {
 	require.NoError(t, p.SetVC(conn, 99))
 	// the real pipelines would shell out to ffmpeg and yt-dlp; these tests drive
 	// streamFrames directly instead, so no track worker may start on its own
+	trackDone := make(chan struct{}, 8)
 	p.playTrackFn = func(ctx context.Context, gen uint64, tr Track) error {
-		<-ctx.Done()
-		return ctx.Err()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-trackDone:
+			return nil // the track played to its end
+		}
 	}
 	p.playSoundFn = func(ctx context.Context, s SoundTrack) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
 	t.Cleanup(func() { _ = p.Close() })
-	return &outputFixture{Player: p, conn: conn, t: t}
+	return &outputFixture{Player: p, conn: conn, t: t, trackDone: trackDone}
 }
 
 // pages builds a page source yielding the given frames, then ending the stream the
@@ -673,7 +685,7 @@ func TestSpeakingStaysOnAcrossTheHandoffToASound(t *testing.T) {
 
 func TestStaleWorkerCannotDisableNewerOwnerSpeaking(t *testing.T) {
 	f := newOutputFixture(t)
-	require.NoError(t, f.Enqueue(Track{Title: "a", URL: "u"}))
+	require.NoError(t, f.EnqueueMany([]Track{{Title: "a"}, {Title: "b"}}))
 
 	f.unpace()
 	s := f.runMusic("music")
@@ -686,7 +698,7 @@ func TestStaleWorkerCannotDisableNewerOwnerSpeaking(t *testing.T) {
 	gen := f.currentGen()
 	f.mu.Lock()
 	f.gen = gen + 1
-	f.current = &Track{Title: "b"}
+	f.cursor++ // the lineup move a jump produces
 	f.mu.Unlock()
 
 	assert.ErrorIs(t, s.exit(), errOutputLost)
@@ -698,15 +710,15 @@ func TestStaleWorkerCannotDisableNewerOwnerSpeaking(t *testing.T) {
 
 func TestSpeakingOffWhenIdle(t *testing.T) {
 	f := newOutputFixture(t)
-	require.NoError(t, f.Enqueue(Track{Title: "a", URL: "u"}))
+	require.NoError(t, f.Enqueue(Track{Title: "a"}))
 
 	s := f.runMusic("music")
 	defer s.stop()
 	f.awaitFrames("music", 1)
 	require.True(t, f.conn.speakingIsOn())
 
-	// last track finished: the player is idle and must release the flag
-	require.NoError(t, f.SkipNext())
+	// the only track finishes, so nothing is playing and the flag must go
+	f.finishTrack()
 	await(t, "idle", func() bool { return f.Current() == nil })
 
 	assert.False(t, f.conn.speakingIsOn(), "speaking is released when nothing is playing")

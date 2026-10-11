@@ -226,7 +226,6 @@ func isKnownSound(d *DBot, m discord.Message) {
 		if strings.Contains(s.Url, "riotgames") {
 			continue
 		}
-		slog.Debug("isKnownSound", slog.Any("sound.Url", s.Url), slog.Any("name", s.Aliases))
 		seq = append(seq, soundTrack(s))
 	}
 	// `event 13` is one sequence of 13 sounds, not 13 competing requests

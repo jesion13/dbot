@@ -62,7 +62,6 @@ func (srq *soundsRandQ) rand(db *store.Queries, gid string) (store.Sound, error)
 	}
 
 	i := randInt.Int64()
-	slog.Debug("soundsRandQ.rand", slog.Int("sounds", len(sounds)), slog.Int64("randInt", i))
 	v := sounds[i]
 
 	sounds[i] = sounds[len(sounds)-1]
@@ -137,6 +136,7 @@ func findSound(db *store.Queries, name string, gid string) ([]store.Sound, error
 				slog.Warn("sound library exhausted", slog.Int("picked", len(ss)), slog.Any("error", err))
 				break
 			}
+			slog.Debug("random", slog.Any("sound.Url", s.Url), slog.Any("name", s.Aliases))
 			ss = append(ss, s)
 		}
 
@@ -151,7 +151,7 @@ func findSound(db *store.Queries, name string, gid string) ([]store.Sound, error
 	var fullScore int
 	for _, sound := range sounds {
 		for _, alias := range sound.Aliases {
-			score := matchScore(alias, name)
+			score := matchScore(normalize(alias), normalize(name))
 			if score > fullScore {
 				slog.Debug("sound match", slog.Int("score", score), slog.String("alias", alias))
 				fullScore = score

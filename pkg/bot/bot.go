@@ -25,6 +25,7 @@ import (
 	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
 )
 
@@ -126,7 +127,12 @@ func (d *DBot) forwardPlayerErr(e player.Err) {
 func (d *DBot) ReplacePlayer() (*player.Player, error) {
 	d.voiceMu.Lock()
 	defer d.voiceMu.Unlock()
+	return d.replacePlayerLocked()
+}
 
+// replacePlayerLocked is ReplacePlayer's body. The caller must hold voiceMu, which
+// is what serializes attachment and replacement as one transition.
+func (d *DBot) replacePlayerLocked() (*player.Player, error) {
 	old := d.Player()
 	conn, _ := old.Conn()
 
@@ -144,6 +150,44 @@ func (d *DBot) ReplacePlayer() (*player.Player, error) {
 	next := player.NewPlayer()
 	d.SetPlayer(next)
 	return next, closeErr
+}
+
+// AttachVoiceConnection gives an established connection to the active player.
+//
+// It shares voiceMu with ReplacePlayer, so a connection can never be attached to a
+// player that a replacement has already snapshotted - the two operations are one
+// serialized transition. If the player refuses it, the connection is closed here so
+// it is never left unowned.
+func (d *DBot) AttachVoiceConnection(conn voice.Conn, vcid snowflake.ID) error {
+	d.voiceMu.Lock()
+	defer d.voiceMu.Unlock()
+
+	if err := d.Player().SetVC(conn, vcid); err != nil {
+		conn.Close(d.botCtx())
+		return fmt.Errorf("attach voice connection: %w", err)
+	}
+	return nil
+}
+
+// Reconnect tears the voice session down and installs a fresh player that already
+// owns conn. It is the supported way to change connection: the old player is shut
+// down and its connection closed before the new one is attached, so no worker ever
+// writes to a connection that is being taken away.
+func (d *DBot) Reconnect(conn voice.Conn, vcid snowflake.ID) (*player.Player, error) {
+	d.voiceMu.Lock()
+	defer d.voiceMu.Unlock()
+
+	next, err := d.replacePlayerLocked()
+	if err != nil {
+		// the replacement still exists, so the new connection is not orphaned
+		conn.Close(d.botCtx())
+		return next, err
+	}
+	if err := next.SetVC(conn, vcid); err != nil {
+		conn.Close(d.botCtx())
+		return nil, fmt.Errorf("attach voice connection: %w", err)
+	}
+	return next, nil
 }
 
 // playlistInfo is the single place playlist metadata is fetched, so tests can stub it.
@@ -299,9 +343,8 @@ func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 		return fmt.Errorf("failed to join VC: %w", err)
 	}
 
-	if err := d.Player().SetVC(vc, *vs.ChannelID); err != nil {
-		vc.Close(d.botCtx())
-		return fmt.Errorf("failed attaching voice connection: %w", err)
+	if err := d.AttachVoiceConnection(vc, *vs.ChannelID); err != nil {
+		return err
 	}
 	slog.Debug("[dupa]", slog.Any("channel.ChannelID", *vs.ChannelID))
 

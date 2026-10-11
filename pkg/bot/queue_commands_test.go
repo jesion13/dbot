@@ -48,15 +48,27 @@ func (s *stubPlayer) JumpTo(pos int) error {
 
 func (s *stubPlayer) QueueSnapshot() player.QueueSnapshot { return s.snap }
 
-func snapshot(current string, upcoming ...string) player.QueueSnapshot {
-	s := player.QueueSnapshot{}
-	if current != "" {
-		s.Current = &player.Track{Title: current}
+// lineup builds a snapshot: the entry at playing (1-based) is the current one, every
+// earlier entry is played and every later one is still waiting.
+func lineup(playing int, entries ...string) player.QueueSnapshot {
+	var s player.QueueSnapshot
+	for i, title := range entries {
+		e := player.QueueEntry{Track: player.Track{Title: title}, State: player.StateUpcoming}
+		switch {
+		case playing > 0 && i+1 == playing:
+			e.State = player.StatePlaying
+		case playing > 0 && i+1 < playing:
+			e.State = player.StatePlayed
+		}
+		s.Entries = append(s.Entries, e)
 	}
-	for _, u := range upcoming {
-		s.Upcoming = append(s.Upcoming, player.Track{Title: u})
-	}
+	s.CurrentIndex = playing
 	return s
+}
+
+// snapshot is the common case: the first entry is playing, the rest are waiting.
+func snapshot(current string, upcoming ...string) player.QueueSnapshot {
+	return lineup(1, append([]string{current}, upcoming...)...)
 }
 
 func TestParseQueueCommand(t *testing.T) {
@@ -134,7 +146,7 @@ func TestQueueCommandsReportInvalidState(t *testing.T) {
 		want string
 	}{
 		{"nothing playing", &stubPlayer{skipErr: player.ErrNothingPlaying}, queueCommand{action: "next"}, "nothing is playing"},
-		{"no history", &stubPlayer{prevErr: player.ErrNoHistory}, queueCommand{action: "prev"}, "no previous track in history"},
+		{"no history", &stubPlayer{prevErr: player.ErrNoPreviousTrack}, queueCommand{action: "prev"}, "there is no earlier track in the queue"},
 		{"bad position", &stubPlayer{jumpErr: player.ErrInvalidPosition}, queueCommand{action: "jump", pos: 9}, "position out of range"},
 		{"closed", &stubPlayer{skipErr: player.ErrClosed}, queueCommand{action: "next"}, "the player is closed"},
 		{"skipped off the end", &stubPlayer{skipErr: errors.New("boom")}, queueCommand{action: "next"}, "nothing to skip to"},
@@ -161,65 +173,142 @@ func TestListAndQueueAreTheSameOutput(t *testing.T) {
 	assert.Equal(t, queueText(snap), runQueueCommand(listCmd, p))
 }
 
-func TestQueueTextPositions(t *testing.T) {
-	// playing: the current track is 1, so the upcoming ones start at 2
-	got := queueText(snapshot("song", "one", "two"))
-	assert.Contains(t, got, "**Now:** song")
-	assert.Contains(t, got, "\n2. one")
-	assert.Contains(t, got, "\n3. two")
-	assert.NotContains(t, got, "1. song", "the playing track is not repeated in the list")
+func TestQueueTextShowsTheWholeLineup(t *testing.T) {
+	// A B C D E with C playing: everything is listed at its absolute position
+	got := queueText(lineup(3, "A", "B", "C", "D", "E"))
+	lines := strings.Split(got, "\n")
+	require.Len(t, lines, 6)
+	assert.Contains(t, lines[0], "Music queue")
+	assert.Contains(t, lines[1], "1. A")
+	assert.Contains(t, lines[2], "2. B")
+	assert.Contains(t, lines[3], "3. **C**", "the playing entry is the bolded one")
+	assert.Contains(t, lines[4], "4. D")
+	assert.Contains(t, lines[5], "5. E")
 
-	t.Run("idle: the first queued track is 1", func(t *testing.T) {
-		got := queueText(snapshot("", "one", "two"))
-		assert.Contains(t, got, "idle")
-		assert.Contains(t, got, "\n1. one")
-		assert.Contains(t, got, "\n2. two")
-	})
+	// every line is just "N. Title" - no status column, nothing before the number
+	for i, line := range lines[1:] {
+		assert.Regexp(t, `^[0-9]+\. `, line, "line %d must start with its number", i+1)
+		assert.False(t, strings.HasPrefix(line, " "), "line %d must not be indented: %q", i+1, line)
+	}
 
-	t.Run("paused is visible", func(t *testing.T) {
-		snap := snapshot("song")
-		snap.Paused = true
-		assert.Contains(t, queueText(snap), "(paused)")
-	})
-
-	t.Run("empty", func(t *testing.T) {
-		assert.Contains(t, queueText(player.QueueSnapshot{}), "empty")
-	})
-
-	t.Run("nothing after the current track", func(t *testing.T) {
-		got := queueText(snapshot("song"))
-		assert.Contains(t, got, "Nothing queued after this.")
-	})
+	// the playing entry is called out by its title, so the numbers stay flush left
+	assert.Contains(t, lines[3], "3. **C**")
+	assert.NotContains(t, lines[1], "**")
 }
 
-func TestQueueTextNumbersMatchJumpPositions(t *testing.T) {
-	// the numbers the display prints are exactly the positions JumpTo accepts:
-	// playing track is 1, upcoming start at 2
-	got := queueText(snapshot("song", "one", "two"))
+func TestQueueTextPositionsAreAbsoluteAndStable(t *testing.T) {
+	got := queueText(lineup(4, "A", "B", "C", "D", "E"))
 
-	var positions []string
-	for _, line := range strings.Split(got, "\n") {
-		if n, _, ok := strings.Cut(line, ". "); ok && n != "" {
-			positions = append(positions, n)
-		}
+	// every entry appears at its absolute index, none of them relative to the cursor
+	for i, title := range []string{"A", "B", "C", "D", "E"} {
+		assert.Equal(t, i+1, displayIndexOf(got, title), "%s keeps its absolute position", title)
 	}
-	require.Len(t, positions, 2)
-	for i, n := range positions {
-		assert.Equal(t, strconv.Itoa(i+2), n, "upcoming entry %d", i)
+	assert.Equal(t, "D", displayCurrentTitle(got), "the cursor is still position 4, not renumbered to 1")
+}
+
+func TestQueueTextIdleStillShowsTheLineup(t *testing.T) {
+	// everything played, nothing playing
+	got := queueText(lineup(0, "A", "B", "C"))
+	assert.Contains(t, got, "idle", "an idle player says so")
+	assert.Contains(t, got, "1. A")
+	assert.Contains(t, got, "3. C", "the lineup is not presented as empty")
+}
+
+// Imported titles routinely carry newlines, tabs and runs of spaces. Rendered raw,
+// one entry would spill over several lines: the numbering, the state marker and the
+// message splitting all stop lining up.
+func TestQueueTextCollapsesWhitespaceInTitles(t *testing.T) {
+	snap := lineup(2,
+		"Hiszpańskie Dziewczyny\n\nSzanty - Bitwa + lyrics\nCzarnobrody Kapitan",
+		"normal\tTitle",
+		"  spaced   out  ",
+	)
+	lines := strings.Split(queueText(snap), "\n")
+
+	require.Len(t, lines, 4, "one line per entry, however many lines the raw title had")
+	for i, entry := range snap.Entries {
+		assert.Contains(t, lines[i+1], displayTitle(entry.Title), "entry %d keeps its number", i+1)
 	}
+	assert.Contains(t, lines[1], "Hiszpańskie Dziewczyny Szanty - Bitwa + lyrics Czarnobrody Kapitan",
+		"newlines inside a title become spaces")
+	assert.Contains(t, lines[2], "normal Title", "a tab becomes a space")
+	assert.Contains(t, lines[3], "3. spaced out", "runs of spaces collapse")
+}
+
+func TestQueueTextNamesUntitledEntries(t *testing.T) {
+	got := queueText(lineup(1, "   ", "\n\t", "real"))
+	lines := strings.Split(got, "\n")
+	require.Len(t, lines, 4)
+	assert.Contains(t, lines[1], untitledTrack, "a blank title must not look like an empty row")
+	assert.Contains(t, lines[2], untitledTrack)
+	assert.Contains(t, lines[3], "real")
+}
+
+// A title that is long only because of its whitespace still has to fit the message
+// limit, and the split must keep every entry.
+func TestQueueTextWithMultilineTitlesSurvivesMessageSplitting(t *testing.T) {
+	entries := make([]string, 0, 120)
+	for i := range 120 {
+		entries = append(entries, strings.Repeat("tytuł-\n", 6)+strconv.Itoa(i))
+	}
+	display := queueText(lineup(1, entries...))
+
+	chunks := splitMessages(display, maxQueueMsgLen)
+	require.Greater(t, len(chunks), 1)
+	assert.Equal(t, display, strings.Join(chunks, ""), "nothing is lost across the split")
+
+	// every entry still shows its absolute position, on its own line, in order
+	lines := strings.Split(display, "\n")
+	require.Len(t, lines, 121)
+	for i := range 120 {
+		assert.Contains(t, lines[i+1], strconv.Itoa(i+1)+". ", "entry %d keeps its number", i+1)
+		assert.Equal(t, i+1, displayIndexOf(display, displayTitle(entries[i])), "entry %d", i+1)
+	}
+}
+
+// The list itself is uniform: a track the cursor jumped over is not visually flagged,
+// because the marker column was exactly the thing that made the output look broken.
+// The state is still in the snapshot for anything that needs it.
+func TestQueueTextIsUniformRegardlessOfState(t *testing.T) {
+	states := []player.QueueState{
+		player.StateUpcoming, player.StatePlayed, player.StateSkipped,
+	}
+	var lines []string
+	for _, st := range states {
+		snap := lineup(1, "A", "B")
+		snap.Entries[0].State = st
+		lines = append(lines, strings.Split(queueText(snap), "\n")[1])
+	}
+	for _, l := range lines {
+		assert.Equal(t, "1. **A**", l)
+	}
+}
+
+func TestQueueTextPausedAndEmpty(t *testing.T) {
+	snap := snapshot("song")
+	snap.Paused = true
+	assert.Contains(t, queueText(snap), "paused")
+
+	assert.Contains(t, queueText(player.QueueSnapshot{}), "nothing has been queued yet")
+
+	closed := lineup(1, "A")
+	closed.Closed = true
+	assert.Contains(t, queueText(closed), "closed")
 }
 
 func TestQueueTextHidesInternals(t *testing.T) {
 	snap := player.QueueSnapshot{
-		Current:   &player.Track{Title: "song", URL: "https://x", Filepath: "/tmp/secret.opus"},
-		Upcoming:  []player.Track{{Title: "next", Filepath: "/tmp/secret2.opus"}},
-		History:   []player.Track{{Title: "old"}},
-		SoundWait: 3,
+		Entries: []player.QueueEntry{
+			{Track: player.Track{Title: "song", URL: "https://x", Filepath: "/tmp/secret.opus"}, State: player.StatePlaying},
+			{Track: player.Track{Title: "next", Filepath: "/tmp/secret2.opus"}},
+		},
+		CurrentIndex: 1,
+		SoundWait:    3,
 	}
 	got := queueText(snap)
-	assert.NotContains(t, got, "/tmp/")
-	assert.NotContains(t, got, "https://x")
-	assert.NotContains(t, got, "old", "history is not displayed")
+	assert.NotContains(t, got, "/tmp/", "no local paths")
+	assert.NotContains(t, got, "https://x", "no source urls")
+	assert.NotContains(t, got, "boom", "sound requests never appear in the music lineup")
 }
 
 func TestSplitMessages(t *testing.T) {
@@ -372,38 +461,96 @@ func TestQueueCommandsReachARealPlayer(t *testing.T) {
 }
 
 // The queue is held in a controlled state rather than left to real playback: a
-// track with no voice connection fails instantly and advances into history, which
-// would make the displayed positions depend on timing.
+// track with no voice connection fails instantly and advances, which would make the
+// displayed positions depend on timing.
 func TestQueueTextNumbersAreJumpPositions(t *testing.T) {
 	build := func() *player.Player {
 		p := player.NewPlayer()
 		t.Cleanup(func() { _ = p.Close() })
-		require.NoError(t, p.EnqueueMany([]player.Track{{Title: "a"}, {Title: "b"}, {Title: "c"}, {Title: "d"}}))
+		require.NoError(t, p.EnqueueMany([]player.Track{
+			{Title: "a"}, {Title: "b"}, {Title: "c"}, {Title: "d"},
+		}))
 		return p
 	}
 
-	// read the display and jump every position it prints, each on a fresh queue
-	// because a jump drops the tracks it skipped
-	displayed := build().QueueSnapshot()
-	var positions []int
-	for _, line := range strings.Split(queueText(displayed), "\n") {
-		n, _, ok := strings.Cut(line, ". ")
-		if !ok || n == "" {
-			continue
-		}
-		pos, err := strconv.Atoi(n)
-		require.NoError(t, err)
-		positions = append(positions, pos)
-	}
-
-	require.Equal(t, []int{2, 3, 4}, positions, "upcoming entries are numbered from 2 while playing")
+	// every number the display prints is a position the player accepts, and it is
+	// the absolute index in the lineup - not an offset from the cursor
+	positions := displayPositions(queueText(build().QueueSnapshot()))
+	require.Equal(t, []int{1, 2, 3, 4}, positions, "every entry is listed, from position 1")
 	for _, pos := range positions {
 		require.NoError(t, build().JumpTo(pos), "displayed position %d", pos)
 	}
 }
 
-// The player advances on its own when it has no connection, so this covers the
-// contract the display relies on: it stays correct without anyone driving it.
+// A lineup that has already advanced still reports positions the player accepts, and
+// the oldest entry is still reachable.
+func TestQueueTextNumbersStayValidAfterPlayback(t *testing.T) {
+	p := player.NewPlayer()
+	t.Cleanup(func() { _ = p.Close() })
+	require.NoError(t, p.EnqueueMany([]player.Track{{Title: "a"}, {Title: "b"}, {Title: "c"}}))
+
+	// no voice connection, so every track fails and the player advances to the end
+	require.Eventually(t, func() bool { return p.QueueSnapshot().CurrentIndex == 0 },
+		2*time.Second, 5*time.Millisecond)
+
+	s := p.QueueSnapshot()
+	assert.Len(t, s.Entries, 3, "the lineup is intact")
+	display := queueText(s)
+	for i, e := range s.Entries {
+		assert.Equal(t, i+1, displayIndexOf(display, e.Title),
+			"entry %d keeps its absolute position", i+1)
+	}
+	// and position 1 still resolves to the first track
+	require.NoError(t, p.JumpTo(1))
+	assert.Equal(t, "a", p.Current().Title)
+}
+
+// entryLine splits a rendered lineup line into its absolute position and title.
+// Every line looks like "<position>. <title>", possibly with the title in bold.
+func entryLine(line string) (pos int, title string, ok bool) {
+	n, title, found := strings.Cut(line, ". ")
+	if !found {
+		return 0, "", false
+	}
+	pos, err := strconv.Atoi(n)
+	if err != nil {
+		return 0, "", false
+	}
+	return pos, strings.Trim(title, "*"), true
+}
+
+// displayPositions is the list of positions a rendered queue shows.
+func displayPositions(display string) []int {
+	var out []int
+	for _, line := range strings.Split(display, "\n") {
+		if pos, _, ok := entryLine(line); ok {
+			out = append(out, pos)
+		}
+	}
+	return out
+}
+
+// displayCurrentTitle is the title of the bolded (playing) entry.
+func displayCurrentTitle(display string) string {
+	for _, line := range strings.Split(display, "\n") {
+		if strings.Contains(line, "**") {
+			_, title, _ := entryLine(line)
+			return title
+		}
+	}
+	return ""
+}
+
+// displayIndexOf is the position a rendered queue gives to a title, 0 when absent.
+func displayIndexOf(display, title string) int {
+	for _, line := range strings.Split(display, "\n") {
+		if pos, t, ok := entryLine(line); ok && t == title {
+			return pos
+		}
+	}
+	return 0
+}
+
 func TestQueueWithoutVoiceConnectionStaysConsistent(t *testing.T) {
 	p := player.NewPlayer()
 	t.Cleanup(func() { _ = p.Close() })
@@ -411,8 +558,8 @@ func TestQueueWithoutVoiceConnectionStaysConsistent(t *testing.T) {
 
 	require.Eventually(t, func() bool { return p.Current() == nil }, 2*time.Second, 5*time.Millisecond)
 	s := p.QueueSnapshot()
-	assert.Empty(t, s.Upcoming)
-	assert.Len(t, s.History, 2)
+	assert.Len(t, s.Entries, 2, "the lineup survives an idle player")
+	assert.Zero(t, s.CurrentIndex)
 }
 
 // msg is the minimum a queue command needs: content, author and bot flag.

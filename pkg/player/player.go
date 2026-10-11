@@ -32,9 +32,13 @@ const (
 var (
 	ErrClosed          = errors.New("player is closed")
 	ErrNothingPlaying  = errors.New("nothing is playing")
-	ErrNoHistory       = errors.New("no previous track in history")
+	ErrNoPreviousTrack = errors.New("no earlier track in the lineup")
+	ErrNoNextTrack     = errors.New("no later track in the lineup")
 	ErrInvalidPosition = errors.New("position out of range")
 	ErrNoVoiceConn     = errors.New("no voice connection")
+	// ErrConnectionTaken means this player already owns a different connection and
+	// will not swap it out from under its workers.
+	ErrConnectionTaken = errors.New("player already has a voice connection")
 
 	ErrEmptySoundSequence   = errors.New("sound sequence is empty")
 	ErrSoundSequenceTooLong = errors.New("sound sequence too long")
@@ -138,11 +142,18 @@ type Player struct {
 	// registered under mu, and Close stops registering them before it waits.
 	wg sync.WaitGroup
 
-	queue []*Track
-	// current is the track the player is working on, whether it is streaming or
-	// suspended behind a pause or a sound. nil means idle.
-	current     *Track
-	history     []*Track
+	// lineup is the complete ordered track list for this player's lifetime. Entries
+	// are only ever appended, so a 1-based position always means the same track for
+	// as long as the player lives - including tracks that already played.
+	lineup []*lineupEntry
+	// cursor is the 0-based index of the playing entry, or -1 when idle.
+	cursor int
+	// resumeIndex is where playback continues when the player is idle: 0 on a fresh
+	// player, and one past the last entry once the lineup has been played out. New
+	// tracks are appended there, so a player that finished its lineup resumes with
+	// the newly added tracks instead of replaying from position 1.
+	resumeIndex int
+	history     []Track
 	paused      bool
 	soundActive bool
 	closed      bool
@@ -196,6 +207,7 @@ func NewPlayer() *Player {
 		baseCtx:     ctx,
 		baseCancel:  cancel,
 	}
+	p.cursor = -1
 	p.gate = sync.NewCond(&p.mu)
 	p.playTrackFn = p.playTrack
 	p.playSoundFn = p.playSound
@@ -237,9 +249,9 @@ func (p *Player) Close() error {
 	// this caller owns the shutdown from here on
 	p.closed = true
 	p.abortLocked()
-	p.queue = nil
+	p.lineup = nil
 	p.history = nil
-	p.current = nil
+	p.cursor = -1
 	p.soundQ = nil
 	p.soundActive = false
 	p.gate.Broadcast()
@@ -269,20 +281,29 @@ func (p *Player) Close() error {
 	return nil
 }
 
-// SetVC installs the voice connection the player writes to.
+// SetVC gives the player its voice connection.
 //
-// Contract: one player uses one connection for its whole lifetime. SetVC is meant
-// for a player that is not streaming yet - a worker captures the connection when
-// its track starts and keeps it for that track, so changing the field mid-playback
-// would not move it. Reconnecting therefore goes through replacing the player (see
-// the bot's lifecycle operation), which stops the workers first.
+// Contract, enforced here:
 //
-// After Close it is refused: a shut-down player owns no output.
+//   - a fresh player takes its first connection;
+//   - setting the same connection again is a no-op, so a retry is harmless;
+//   - swapping in a different connection is refused with ErrConnectionTaken. A
+//     worker captures the connection when its track starts, so silently moving the
+//     field would leave playback writing to a connection this player no longer
+//     owns. Reconnecting goes through the bot's lifecycle operation, which closes
+//     the old player and its connection first;
+//   - a closed player refuses any connection with ErrClosed.
 func (p *Player) SetVC(conn voice.Conn, vcid snowflake.ID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return ErrClosed
+	}
+	if p.conn != nil {
+		if p.conn == conn {
+			return nil // idempotent
+		}
+		return ErrConnectionTaken
 	}
 	p.conn = conn
 	p.vcid = vcid
@@ -301,21 +322,24 @@ func (p *Player) Conn() (voice.Conn, snowflake.ID) {
 func (p *Player) Current() *Track {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.current == nil {
+	if p.cursor < 0 || p.cursor >= len(p.lineup) {
 		return nil
 	}
-	c := *p.current
+	c := p.lineup[p.cursor].track
 	return &c
 }
 
-// Enqueue appends one track. An idle player starts playing it immediately.
-// It does not clear a manual pause: only TogglePause does that.
+// Enqueue appends one track to the end of the lineup and starts playback if the
+// player is idle. It does not clear a manual pause: only TogglePause does that.
 func (p *Player) Enqueue(t Track) error {
 	return p.EnqueueMany([]Track{t})
 }
 
-// EnqueueMany appends tracks atomically, in the given order, and starts playback
-// if the player was idle. An empty batch changes nothing.
+// EnqueueMany appends tracks atomically, in the given order, and starts playback if
+// the player is idle. An empty batch changes nothing.
+//
+// Appending never renumbers what is already there, and never restarts a lineup the
+// player has already played to the end of.
 func (p *Player) EnqueueMany(tracks []Track) error {
 	if len(tracks) == 0 {
 		return nil
@@ -330,80 +354,136 @@ func (p *Player) EnqueueMany(tracks []Track) error {
 	for _, t := range tracks {
 		p.nextID++
 		t.ID = p.nextID
-		p.queue = append(p.queue, &t)
+		p.lineup = append(p.lineup, &lineupEntry{track: t, state: StateUpcoming})
 	}
-	if p.current == nil {
-		p.startNextLocked()
+	if p.cursor < 0 {
+		// resume where we left off: on a fresh player that is position 1, and on a
+		// player that already played its lineup out it is the first newly appended
+		// entry, never a replay of position 1
+		if p.resumeIndex < len(p.lineup) {
+			p.cursor = p.resumeIndex
+		}
+		p.startLocked()
 	}
 	return nil
 }
 
-// SkipNext stops the current track and starts the next one. No upcoming track
-// leaves the player idle.
+// SkipNext stops the current track and moves to the next absolute position. The
+// entry it leaves stays in the lineup, marked as skipped.
 func (p *Player) SkipNext() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return ErrClosed
 	}
-	if p.current == nil {
+	if p.cursor < 0 {
 		return ErrNothingPlaying
 	}
-	p.pushHistoryLocked(*p.current)
-	p.startNextLocked()
+	if p.cursor+1 >= len(p.lineup) {
+		return ErrNoNextTrack
+	}
+
+	p.pushHistoryLocked(p.lineup[p.cursor].track)
+	p.lineup[p.cursor].state = StateSkipped
+	p.cursor++
+	p.startLocked()
 	return nil
 }
 
-// Previous returns to the most recently played track. The track that was playing
-// goes back to the front of the queue, so it can be replayed with SkipNext.
+// Previous moves to the preceding absolute position. When the player is idle at the
+// end of a lineup it resumes from the last entry, so a finished queue can be picked
+// up again. Entries are never removed, reordered or renumbered.
 func (p *Player) Previous() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return ErrClosed
 	}
-	if len(p.history) == 0 {
-		return ErrNoHistory
+
+	switch {
+	case p.cursor > 0:
+		p.cursor--
+	case p.cursor == 0:
+		return ErrNoPreviousTrack
+	case len(p.lineup) > 0:
+		// idle: resume from the end so playback can continue
+		p.cursor = len(p.lineup) - 1
+	default:
+		return ErrNoPreviousTrack
 	}
 
-	prev := p.history[len(p.history)-1]
-	p.history = p.history[:len(p.history)-1]
-
-	upcoming := p.queue
-	if p.current != nil {
-		p.pushHistoryLocked(*p.current)
-		upcoming = append([]*Track{p.current}, p.queue...)
-	}
-	p.beginLocked(prev, upcoming)
+	p.pushHistoryLocked(p.lineup[p.cursor].track)
+	p.startLocked()
 	return nil
 }
 
-// JumpTo moves to a 1-based position, where 1 is the playing track while playing
-// and the next queued track while idle. Tracks skipped over leave the queue; their
-// cached files are untouched.
+// JumpTo plays a 1-based absolute position in the lineup - the same numbering
+// QueueSnapshot reports and the text commands display. Entries before and after it
+// are left exactly where they are.
 func (p *Player) JumpTo(position int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return ErrClosed
 	}
-
-	seq := p.orderedLocked()
-	if position < 1 || position > len(seq) {
-		return fmt.Errorf("%w: %d (1-%d)", ErrInvalidPosition, position, len(seq))
+	if position < 1 || position > len(p.lineup) {
+		return fmt.Errorf("%w: %d (1-%d)", ErrInvalidPosition, position, len(p.lineup))
 	}
-	if p.current != nil && position == 1 {
-		return nil
+	if p.cursor == position-1 {
+		return nil // already there
 	}
 
-	target := seq[position-1]
-	// full slice expression: the result must not share storage with seq's tail
-	upcoming := append([]*Track(nil), seq[position:]...)
-	if p.current != nil {
-		p.pushHistoryLocked(*p.current)
+	if p.cursor >= 0 && p.cursor < len(p.lineup) && p.lineup[p.cursor].state == StatePlaying {
+		// we are leaving a track that did not finish
+		p.lineup[p.cursor].state = StateSkipped
 	}
-	p.beginLocked(target, upcoming)
+	p.cursor = position - 1
+	p.startLocked()
 	return nil
+}
+
+// startLocked begins playback at the cursor, invalidating whatever was playing.
+// The lineup itself is never touched.
+func (p *Player) startLocked() {
+	if p.cursor < 0 || p.cursor >= len(p.lineup) {
+		p.abortLocked()
+		p.cursor = -1
+		p.refreshOutputLocked()
+		return
+	}
+
+	entry := p.lineup[p.cursor]
+	entry.state = StatePlaying
+
+	p.abortLocked()
+	p.gen++
+	gen := p.gen
+	ctx, cancel := context.WithCancel(p.baseCtx)
+	p.cancel = cancel
+	p.refreshOutputLocked()
+
+	// registered under mu, so Close cannot start waiting before this is visible
+	p.wg.Add(1)
+	go func() {
+		defer p.wg.Done()
+		p.runTrack(gen, ctx, entry.track)
+	}()
+}
+
+// advanceLocked moves past the finished entry, or goes idle at the end of the
+// lineup. The finished entry stays where it is.
+func (p *Player) advanceLocked() {
+	if p.cursor >= 0 && p.cursor < len(p.lineup) {
+		p.lineup[p.cursor].state = StatePlayed
+	}
+	if p.cursor+1 < len(p.lineup) {
+		p.cursor++
+		p.resumeIndex = p.cursor
+	} else {
+		p.cursor = -1
+		p.resumeIndex = len(p.lineup)
+	}
+	p.startLocked()
 }
 
 // TogglePause flips the user's own pause. Sound suspension is separate and never
@@ -428,86 +508,29 @@ func (p *Player) Paused() bool {
 	return p.paused
 }
 
-// QueueSnapshot returns a consistent copy of the whole queue state.
+// QueueSnapshot returns a consistent copy of the player's complete lineup and
+// where playback currently sits in it.
 func (p *Player) QueueSnapshot() QueueSnapshot {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.snapshotLocked()
-}
 
-func (p *Player) snapshotLocked() QueueSnapshot {
-	s := QueueSnapshot{
-		Upcoming:  make([]Track, 0, len(p.queue)),
-		History:   make([]Track, 0, len(p.history)),
+	snap := QueueSnapshot{
+		Entries:   make([]QueueEntry, 0, len(p.lineup)),
 		Paused:    p.paused,
 		SoundWait: len(p.soundQ),
 		Closed:    p.closed,
 	}
-	if p.current != nil {
-		c := *p.current
-		s.Current = &c
+	if p.cursor >= 0 && p.cursor < len(p.lineup) {
+		snap.CurrentIndex = p.cursor + 1
 	}
-	for _, t := range p.queue {
-		s.Upcoming = append(s.Upcoming, *t)
+	for _, e := range p.lineup {
+		snap.Entries = append(snap.Entries, QueueEntry{Track: e.track, State: e.state})
 	}
-	for _, t := range p.history {
-		s.History = append(s.History, *t)
-	}
-	return s
-}
-
-// startNextLocked promotes the head of the queue, or goes idle when it is empty.
-func (p *Player) startNextLocked() {
-	if len(p.queue) == 0 {
-		p.abortLocked()
-		p.current = nil
-		p.queue = nil
-		p.refreshOutputLocked()
-		return
-	}
-	next := p.queue[0]
-	// full slice expression so later appends cannot write into the old backing array
-	p.beginLocked(next, p.queue[1:len(p.queue):len(p.queue)])
-}
-
-// beginLocked is the single entry point into playback: it invalidates whatever was
-// playing and starts t with the given upcoming queue.
-func (p *Player) beginLocked(t *Track, upcoming []*Track) {
-	p.abortLocked()
-	p.current = t
-	p.queue = upcoming
-	if t == nil {
-		p.refreshOutputLocked()
-		return
-	}
-
-	p.gen++
-	gen := p.gen
-	ctx, cancel := context.WithCancel(p.baseCtx)
-	p.cancel = cancel
-	p.refreshOutputLocked()
-
-	// registered under mu, so Close cannot start waiting before this is visible
-	p.wg.Add(1)
-	go func() {
-		defer p.wg.Done()
-		p.runTrack(gen, ctx, *t)
-	}()
-}
-
-// abortLocked invalidates the running track. Bumping gen is what makes the old
-// worker's frames and its completion event no-ops; cancel is what unblocks it.
-func (p *Player) abortLocked() {
-	p.gen++
-	if p.cancel != nil {
-		p.cancel()
-		p.cancel = nil
-	}
-	p.gate.Broadcast()
+	return snap
 }
 
 // runTrack is the authoritative completion path of one track: whatever happens -
-// end of file, decoder error, cancellation - the queue advances at most once.
+// end of file, decoder error, cancellation - the cursor advances at most once.
 func (p *Player) runTrack(gen uint64, ctx context.Context, t Track) {
 	err := p.playTrackFn(ctx, gen, t)
 
@@ -520,7 +543,7 @@ func (p *Player) runTrack(gen uint64, ctx context.Context, t Track) {
 		p.reportErr(p.playerErr("failed to play '%s'", t.Title, err))
 	}
 	p.pushHistoryLocked(t)
-	p.startNextLocked()
+	p.advanceLocked()
 }
 
 func (p *Player) playerErr(msg string, vars ...any) Err {
@@ -557,11 +580,22 @@ func (p *Player) reportErr(e Err) {
 
 func (p *Player) musicEligibleLocked(gen uint64, ctx context.Context) bool {
 	return !p.closed && gen == p.gen && ctx.Err() == nil &&
-		p.current != nil && !p.paused && !p.soundActive
+		p.cursor >= 0 && p.cursor < len(p.lineup) && !p.paused && !p.soundActive
 }
 
 func (p *Player) soundEligibleLocked(ctx context.Context) bool {
 	return !p.closed && ctx.Err() == nil
+}
+
+// abortLocked invalidates the running track. Bumping gen is what makes the old
+// worker's frames and its completion event no-ops; cancel is what unblocks it.
+func (p *Player) abortLocked() {
+	p.gen++
+	if p.cancel != nil {
+		p.cancel()
+		p.cancel = nil
+	}
+	p.gate.Broadcast()
 }
 
 // streamAliveLocked reports whether this stream is still the authoritative one. It
@@ -618,10 +652,13 @@ func (p *Player) submitFrame(ctx context.Context, conn voice.Conn, frame []byte,
 			p.mu.Unlock()
 			continue
 		}
-		// eligibility and the write are one critical section, and only a frame that
-		// really goes out advances the pacing clock
-		p.commitFrameLocked(time.Now().UnixMilli())
+		// eligibility and the write are one critical section
 		err := p.writeFrameLocked(conn, frame)
+		if err == nil {
+			// only a frame that really went out advances the shared pacing clock;
+			// a failed write must not reserve the slot or the next frames would burst
+			p.commitFrameLocked(time.Now().UnixMilli())
+		}
 		p.mu.Unlock()
 		return err
 	}
@@ -664,7 +701,7 @@ func (p *Player) outputActiveLocked() bool {
 	if p.soundActive {
 		return true
 	}
-	return p.current != nil && !p.paused
+	return p.cursor >= 0 && p.cursor < len(p.lineup) && !p.paused
 }
 
 // setSpeakingLocked reconciles discord's speaking flag with what the output is
