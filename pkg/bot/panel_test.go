@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"dbot/pkg/db/types"
 	"dbot/pkg/player"
@@ -16,6 +17,7 @@ import (
 	"github.com/disgoorg/disgo/cache"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,177 +47,262 @@ func panelSnapshot(n, current int, titles ...string) player.QueueSnapshot {
 	return s
 }
 
-func panelPositions(rows []panelRow) []int {
-	out := make([]int, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, r.Position)
-	}
-	return out
-}
-
-func panelCurrentPositions(rows []panelRow) []int {
-	var out []int
-	for _, r := range rows {
-		if r.Current {
-			out = append(out, r.Position)
-		}
-	}
-	return out
-}
-
-// --- window ------------------------------------------------------------------
-
-func TestPanelWindowAtTheBeginning(t *testing.T) {
-	rows := panelWindow(panelSnapshot(20, 1))
-
-	// nothing before position 1 exists, so the window starts there
-	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, panelPositions(rows),
-		"three before position 1 is nothing, so we get 1..11")
-	assert.Equal(t, []int{1}, panelCurrentPositions(rows))
-}
-
-func TestPanelWindowInTheMiddle(t *testing.T) {
-	rows := panelWindow(panelSnapshot(40, 20))
-
-	assert.Equal(t, []int{17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30}, panelPositions(rows),
-		"three before and ten after the current position")
-	assert.Equal(t, []int{20}, panelCurrentPositions(rows))
-	assert.Equal(t, "track 17", rows[0].Title, "titles come from the same absolute position")
-}
-
-func TestPanelWindowAtTheEnd(t *testing.T) {
-	rows := panelWindow(panelSnapshot(8, 8))
-
-	assert.Equal(t, []int{5, 6, 7, 8}, panelPositions(rows),
-		"nothing exists after the last position, so the window just stops")
-	assert.Equal(t, []int{8}, panelCurrentPositions(rows))
-}
-
-func TestPanelWindowNearTheStartHasOnlyWhatExists(t *testing.T) {
-	// a lineup shorter than the whole window must not invent positions
-	rows := panelWindow(panelSnapshot(3, 2))
-
-	assert.Equal(t, []int{1, 2, 3}, panelPositions(rows))
-	assert.Equal(t, []int{2}, panelCurrentPositions(rows))
-}
-
-func TestPanelWindowNumbersAreAbsolute(t *testing.T) {
-	// positions keep pointing at the same track however far playback has moved, so
-	// the window never renumbers and never drops an entry
-	for _, cur := range []int{1, 2, 5, 14, 15, 16, 25} {
-		rows := panelWindow(panelSnapshot(25, cur))
-		for _, r := range rows {
-			assert.Equal(t, fmt.Sprintf("track %d", r.Position), r.Title,
-				"position %d must be the track that was enqueued at that position", r.Position)
-		}
-	}
-}
-
-func TestPanelWindowEmptyLineup(t *testing.T) {
-	assert.Empty(t, panelWindow(panelSnapshot(0, 0)))
-}
-
-func TestPanelWindowIdleShowsWhatWouldPlayNext(t *testing.T) {
-	rows := panelWindow(panelSnapshot(20, 0))
-
-	assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, panelPositions(rows))
-	assert.Empty(t, panelCurrentPositions(rows), "nothing is playing, so nothing is highlighted")
-}
-
 // --- rendering ---------------------------------------------------------------
 
-func TestPanelRenderPointsAtTheCurrentTrack(t *testing.T) {
-	body := panelBody(panelWindow(panelSnapshot(6, 3)))
-
-	for i, line := range strings.Split(body, "\n") {
-		position := i + 1
-		if position == 3 {
-			assert.True(t, strings.HasPrefix(line, panelNowMarker),
-				"the arrow points at the playing row: %q", line)
-		} else {
-			assert.False(t, strings.HasPrefix(line, "▶"),
-				"position %d must not be pointed at: %q", position, line)
+// panelText flattens a rendered panel into one string per text display, so a test can
+// assert on what the user actually reads without walking the component tree.
+func panelText(t *testing.T, msg discord.MessageCreate) []string {
+	t.Helper()
+	var out []string
+	for _, lc := range msg.Components {
+		container, ok := lc.(discord.ContainerComponent)
+		require.True(t, ok, "the panel is one container")
+		for _, sc := range container.Components {
+			if td, ok := sc.(discord.TextDisplayComponent); ok {
+				out = append(out, td.Content)
+			}
 		}
-		// the marker column is a fixed width, so every number starts at the same offset
-		want := strings.Repeat(" ", len([]rune(panelNowMarker))) +
-			fmt.Sprintf("%d. track %d", position, position)
-		if position == 3 {
-			want = panelNowMarker + fmt.Sprintf("%d. track %d", position, position)
-		}
-		assert.Equal(t, want, line, "line %d keeps its absolute number and alignment", position)
 	}
-	assert.NotEmpty(t, renderPanel(1, panelSnapshot(6, 3)).components)
+	return out
 }
 
-// The arrow is the only marker: no leftover bold to say the same thing twice.
-func TestPanelRenderHasOneMarkerOnly(t *testing.T) {
-	body := panelBody(panelWindow(panelSnapshot(6, 3)))
-
-	assert.NotContains(t, body, "**", "the arrow replaces the bold")
-	assert.Equal(t, 1, strings.Count(body, "▶"), "exactly one row is pointed at")
+func panelAllText(t *testing.T, msg discord.MessageCreate) string {
+	return strings.Join(panelText(t, msg), "\n")
 }
 
-func TestPanelRenderHeaderStatesPlayback(t *testing.T) {
+func panelButtons(t *testing.T, msg discord.MessageCreate) []discord.ButtonComponent {
+	t.Helper()
+	var out []discord.ButtonComponent
+	for _, lc := range msg.Components {
+		container := lc.(discord.ContainerComponent)
+		for _, sc := range container.Components {
+			row, ok := sc.(discord.ActionRowComponent)
+			if !ok {
+				continue
+			}
+			for _, ic := range row.Components {
+				if b, ok := ic.(discord.ButtonComponent); ok {
+					out = append(out, b)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// panelButtonsOf pulls the buttons out of an already-rendered payload.
+func panelButtonsOf(t *testing.T, msg discord.MessageCreate) []discord.ButtonComponent {
+	t.Helper()
+	var out []discord.ButtonComponent
+	for _, lc := range msg.Components {
+		container, ok := lc.(discord.ContainerComponent)
+		require.True(t, ok)
+		for _, sc := range container.Components {
+			row, ok := sc.(discord.ActionRowComponent)
+			if !ok {
+				continue
+			}
+			for _, ic := range row.Components {
+				if b, ok := ic.(discord.ButtonComponent); ok {
+					out = append(out, b)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func panelDisplayedNumbers(t *testing.T, msg discord.MessageCreate) []string {
+	t.Helper()
+	var out []string
+	for _, text := range panelText(t, msg) {
+		for _, line := range strings.Split(text, "\n") {
+			if strings.HasPrefix(line, "`") {
+				out = append(out, line)
+			}
+		}
+	}
+	return out
+}
+
+// The window is 3 before, the current track, and 10 after, clipped to what exists.
+func TestPanelV2WindowBoundaries(t *testing.T) {
+	t.Run("at the beginning there is nothing before", func(t *testing.T) {
+		text := panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(20, 1)))
+
+		assert.NotContains(t, text, "PREVIOUS POSITIONS", "there is nothing before position 1")
+		assert.Contains(t, text, "#1", "position 1 is the now playing row")
+		assert.Contains(t, text, "`11` track 11", "and ten positions follow it")
+		assert.NotContains(t, text, "`12`", "only ten follow")
+	})
+
+	t.Run("middle", func(t *testing.T) {
+		got := panelDisplayedNumbers(t, buildPlayerPanelV2(1, panelSnapshot(40, 20)))
+		// 17..19 precede, 20..30 follow
+		assert.Contains(t, strings.Join(got, " "), "`17` track 17")
+		assert.Contains(t, strings.Join(got, " "), "`19` track 19")
+		assert.Contains(t, strings.Join(got, " "), "`30` track 30")
+		assert.NotContains(t, strings.Join(got, " "), "`16`", "only three precede")
+		assert.NotContains(t, strings.Join(got, " "), "`31`", "only ten follow")
+	})
+
+	t.Run("at the end nothing follows", func(t *testing.T) {
+		text := panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(8, 8)))
+		assert.NotContains(t, text, "UP NEXT", "there is nothing after the last position")
+		assert.Contains(t, text, "`05` track 5")
+	})
+
+	t.Run("short lineup shows only what exists", func(t *testing.T) {
+		text := panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(3, 2)))
+		assert.Contains(t, text, "`01` track 1")
+		assert.Contains(t, text, "`03` track 3")
+		assert.NotContains(t, text, "`04`")
+	})
+}
+
+// Positions are absolute, so a number the user read earlier still names the same track.
+func TestPanelV2NumbersAreAbsolute(t *testing.T) {
+	for _, cur := range []int{1, 2, 5, 14, 25} {
+		text := panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(25, cur)))
+		for _, pos := range visiblePositions(t, text) {
+			assert.Contains(t, text, fmt.Sprintf("`%02d` track %d", pos, pos),
+				"position %d must be the track enqueued at that position (cursor %d)", pos, cur)
+		}
+	}
+}
+
+func visiblePositions(t *testing.T, text string) []int {
+	t.Helper()
+	var out []int
+	for _, block := range strings.Split(text, "\n") {
+		if !strings.HasPrefix(block, "`") {
+			continue
+		}
+		var n int
+		_, _ = fmt.Sscanf(block, "`%02d`", &n)
+		out = append(out, n)
+	}
+	return out
+}
+
+func TestPanelV2HighlightsTheCurrentTrack(t *testing.T) {
+	text := panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(6, 3)))
+
+	assert.Contains(t, text, "#3")
+	assert.Contains(t, text, "**track 3**", "the now playing title is bold")
+	assert.NotContains(t, text, "**track 4**", "no other track is bolded")
+}
+
+func TestPanelV2StatusStates(t *testing.T) {
 	t.Run("playing", func(t *testing.T) {
-		assert.Contains(t, panelHead(panelSnapshot(3, 1)), "Playing")
+		assert.Contains(t, panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(5, 2))), "PLAYING · 2 / 5")
 	})
 	t.Run("paused", func(t *testing.T) {
-		s := panelSnapshot(3, 1)
+		s := panelSnapshot(5, 2)
 		s.Paused = true
-		assert.Contains(t, panelHead(s), "Paused")
+		assert.Contains(t, panelAllText(t, buildPlayerPanelV2(1, s)), "PAUSED · 2 / 5")
 	})
-	t.Run("stopped", func(t *testing.T) {
-		assert.Contains(t, panelHead(panelSnapshot(3, 0)), "Stopped")
+	t.Run("stopped with a lineup", func(t *testing.T) {
+		text := panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(5, 0)))
+		assert.Contains(t, text, "STOPPED")
+		assert.Contains(t, text, "NOT PLAYING", "and it must not pretend a track is playing")
 	})
-	t.Run("title", func(t *testing.T) {
-		assert.Contains(t, panelHead(panelSnapshot(3, 1)), "DBot Player")
+	t.Run("stopped empty", func(t *testing.T) {
+		assert.Contains(t, panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(0, 0))), "Nothing queued yet.")
 	})
-}
-
-func TestPanelRenderEmptyAndIdleStates(t *testing.T) {
-	t.Run("empty lineup", func(t *testing.T) {
-		r := renderPanel(1, panelSnapshot(0, 0))
-		assert.Contains(t, panelBody(panelWindow(panelSnapshot(0, 0))), "Nothing queued")
-		assert.Contains(t, panelHead(panelSnapshot(0, 0)), "Stopped")
-		assert.NotEmpty(t, r.components, "an empty panel still shows its buttons")
-	})
-
-	t.Run("idle with a lineup", func(t *testing.T) {
-		body := panelBody(panelWindow(panelSnapshot(3, 0)))
-		assert.NotContains(t, body, "▶", "nothing is playing, so nothing is pointed at")
-		assert.Contains(t, body, "1. track 1", "but the lineup is still listed")
+	t.Run("closed", func(t *testing.T) {
+		s := panelSnapshot(3, 1)
+		s.Closed = true
+		text := panelAllText(t, buildPlayerPanelV2(1, s))
+		assert.Contains(t, text, "Player closed")
+		for _, b := range panelButtons(t, buildPlayerPanelV2(1, s)) {
+			assert.True(t, b.Disabled, "a closed player disables %q", b.Label)
+		}
 	})
 }
 
-func TestPanelRenderShowsWaitingSoundsOnlyWhenThereAreSome(t *testing.T) {
+// Imported titles carry markdown, which must not reach the user as formatting.
+func TestPanelV2EscapesTitleMarkdown(t *testing.T) {
+	s := panelSnapshot(1, 1, "**bold** _under_ `code` [link](url) ~~~")
+
+	text := panelAllText(t, buildPlayerPanelV2(1, s))
+
+	assert.Contains(t, text, `\*\*bold\*\*`)
+	assert.Contains(t, text, "\\`code\\`")
+	assert.Contains(t, text, `\[link\]`)
+	assert.NotContains(t, text, "**bold**", "the title must not render as bold")
+	assert.NotContains(t, text, "[link](url)")
+}
+
+func TestPanelV2ShowsSoundCountOnlyWhenWaiting(t *testing.T) {
+	assert.NotContains(t, panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(3, 1))), "sound")
+
 	s := panelSnapshot(3, 1)
-	assert.Equal(t, "", panelFoot(s))
-
 	s.SoundWait = 1
-	assert.Contains(t, panelFoot(s), "1 sound sequence")
+	assert.Contains(t, panelAllText(t, buildPlayerPanelV2(1, s)), "1 sound sequence waiting")
 
 	s.SoundWait = 4
-	assert.Contains(t, panelFoot(s), "4 sound sequences")
+	assert.Contains(t, panelAllText(t, buildPlayerPanelV2(1, s)), "4 sound sequences waiting")
 }
 
-func TestPanelRenderUsesOneComponentPayload(t *testing.T) {
-	// Components V2 lives entirely in the components: no content, no embeds
-	r := renderPanel(1, panelSnapshot(3, 1))
-	require.Len(t, r.components, 1)
+func TestPanelV2Buttons(t *testing.T) {
+	buttons := panelButtons(t, buildPlayerPanelV2(1, panelSnapshot(4, 2)))
 
-	container, ok := r.components[0].(discord.ContainerComponent)
-	require.True(t, ok, "the panel is a container")
-	assert.NotEmpty(t, container.Components)
-
-	// the control row is the one action row, carrying exactly our four buttons
-	var row *discord.ActionRowComponent
-	for i := range container.Components {
-		if ar, ok := container.Components[i].(discord.ActionRowComponent); ok {
-			row = &ar
-		}
+	require.Len(t, buttons, 4)
+	want := []string{playerPanelEmojiPrev, playerPanelEmojiPause, playerPanelEmojiNext, playerPanelEmojiEvent}
+	for i, b := range buttons {
+		assert.Equal(t, want[i], b.Emoji.Name, "button %d carries its emoji", i)
+		assert.Empty(t, b.Label, "button %d carries no caption; the emoji says it", i)
+		gen, action, ok := parsePanelCustomID(b.CustomID)
+		require.True(t, ok, "%q must parse", b.CustomID)
+		assert.Equal(t, uint64(1), gen, "every button carries the publishing generation")
+		assert.NotEmpty(t, action)
 	}
-	require.NotNil(t, row, "the panel has a control row")
-	require.Len(t, row.Components, 4)
+}
+
+// The bot made this message, so a header naming the bot repeats what the reader
+// already knows.
+func TestPanelV2HasNoBotTitle(t *testing.T) {
+	text := panelAllText(t, buildPlayerPanelV2(1, panelSnapshot(4, 2)))
+
+	assert.NotContains(t, text, "DBot Player")
+	assert.NotContains(t, text, "🎵")
+}
+
+func TestPanelV2PauseEmojiFollowsState(t *testing.T) {
+	assert.Equal(t, playerPanelEmojiPause, pauseButtonEmoji(panelSnapshot(3, 1)))
+	s := panelSnapshot(3, 1)
+	s.Paused = true
+	assert.Equal(t, playerPanelEmojiPlay, pauseButtonEmoji(s))
+	assert.Equal(t, playerPanelEmojiStop, pauseButtonEmoji(panelSnapshot(3, 0)), "idle does not imply resuming")
+}
+
+// Buttons that cannot do anything are disabled rather than lying about it.
+func TestPanelV2DisablesImpossibleActions(t *testing.T) {
+	t.Run("nothing queued", func(t *testing.T) {
+		buttons := panelButtons(t, buildPlayerPanelV2(1, panelSnapshot(0, 0)))
+		require.Len(t, buttons, 4)
+		assert.True(t, buttons[0].Disabled, "there is no earlier track")
+		assert.True(t, buttons[1].Disabled, "nothing is playing to pause")
+		assert.True(t, buttons[2].Disabled, "there is no later track")
+		assert.False(t, buttons[3].Disabled,
+			"Event still works: a sound does not need a queue")
+	})
+	t.Run("at position 1 previous is disabled", func(t *testing.T) {
+		buttons := panelButtons(t, buildPlayerPanelV2(1, panelSnapshot(3, 1)))
+		assert.True(t, buttons[0].Disabled, "there is no earlier track")
+		assert.False(t, buttons[2].Disabled, "next still works")
+	})
+}
+
+func TestPanelV2UsesOneComponentsV2Container(t *testing.T) {
+	msg := buildPlayerPanelV2(1, panelSnapshot(3, 1))
+
+	require.True(t, msg.Flags.Has(discord.MessageFlagIsComponentsV2))
+	require.Len(t, msg.Components, 1)
+	container, ok := msg.Components[0].(discord.ContainerComponent)
+	require.True(t, ok, "the panel is a container")
+	assert.Equal(t, playerPanelAccent, container.AccentColor)
 }
 
 // --- button mapping ----------------------------------------------------------
@@ -231,6 +318,10 @@ type panelBot struct {
 	replies []discord.MessageCreate
 	// deleted records retired panel messages, in order
 	deleted []snowflake.ID
+	// edited records in-place panel rewrites, in order
+	edited []snowflake.ID
+	// updates records the MessageUpdate each rewrite carried
+	updates []discord.MessageUpdate
 	// nextID hands out a fresh message id per publish
 	nextID snowflake.ID
 	// mu guards the recorders: a replacement deletes outside the registry lock, so
@@ -238,6 +329,10 @@ type panelBot struct {
 	mu sync.Mutex
 	// sendErr fails the next publish, so the failure path can be exercised
 	sendErr error
+	// slowSend runs inside the publish, to open a window for an interleaving test
+	slowSend func()
+	// record false keeps the double usable for tests that only care about ordering
+	record bool
 }
 
 func newPanelBot(t *testing.T, tracks ...player.Track) *panelBot {
@@ -256,33 +351,35 @@ func newPanelBot(t *testing.T, tracks ...player.Track) *panelBot {
 	d := &DBot{Ctx: ctx, Client: &bot.Client{Caches: c}}
 	d.SetPlayer(p)
 
-	pb := &panelBot{DBot: d, cache: c, nextID: panelMessage}
-	d.createPanel = func(context.Context, snowflake.ID, ...discord.LayoutComponent) (snowflake.ID, error) {
-		if pb.sendErr != nil {
-			return 0, pb.sendErr
-		}
-		pb.mu.Lock()
-		id := pb.nextID
-		pb.nextID++
-		pb.sent = append(pb.sent, id)
-		pb.mu.Unlock()
-		return id, nil
+	pb := &panelBot{DBot: d, cache: c, nextID: panelMessage, record: true}
+	d.createPanel = func(context.Context, snowflake.ID, discord.MessageCreate) (snowflake.ID, error) {
+		return pb.send(0)
 	}
 	d.answerPanel = func(_ snowflake.ID, _ string, m discord.MessageCreate) (snowflake.ID, error) {
 		if pb.sendErr != nil {
 			return 0, pb.sendErr
 		}
 		pb.mu.Lock()
+		defer pb.mu.Unlock()
 		pb.replies = append(pb.replies, m)
 		id := pb.nextID
 		pb.nextID++
-		pb.sent = append(pb.sent, id)
-		pb.mu.Unlock()
+		// an ephemeral confirmation is not a panel; only count what was really posted
+		if !m.Flags.Has(discord.MessageFlagEphemeral) {
+			pb.sent = append(pb.sent, id)
+		}
 		return id, nil
 	}
 	d.deletePanel = func(_, msgID snowflake.ID) error {
 		pb.mu.Lock()
 		pb.deleted = append(pb.deleted, msgID)
+		pb.mu.Unlock()
+		return nil
+	}
+	d.editPanel = func(_ context.Context, _, msgID snowflake.ID, u discord.MessageUpdate) error {
+		pb.mu.Lock()
+		pb.edited = append(pb.edited, msgID)
+		pb.updates = append(pb.updates, u)
 		pb.mu.Unlock()
 		return nil
 	}
@@ -293,10 +390,40 @@ func newPanelBot(t *testing.T, tracks ...player.Track) *panelBot {
 	return pb
 }
 
+// send stands in for actually publishing a panel message.
+func (pb *panelBot) send(uint64) (snowflake.ID, error) {
+	if pb.slowSend != nil {
+		pb.slowSend()
+	}
+	if pb.sendErr != nil {
+		return 0, pb.sendErr
+	}
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+	id := pb.nextID
+	pb.nextID++
+	if pb.record {
+		pb.sent = append(pb.sent, id)
+	}
+	return id, nil
+}
+
+// discardSends drops what it records, so a test that only cares about ordering can
+// reuse the double without asserting on it.
+func (pb *panelBot) discardSends() {
+	pb.record = false
+}
+
 func (tb *panelBot) sentIDs() []snowflake.ID {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
 	return append([]snowflake.ID(nil), tb.sent...)
+}
+
+func (tb *panelBot) editedIDs() []snowflake.ID {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return append([]snowflake.ID(nil), tb.edited...)
 }
 
 func (tb *panelBot) deletedIDs() []snowflake.ID {
@@ -323,7 +450,7 @@ func TestPanelPreviousButtonGoesBackOnePosition(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(4)...)
 	require.NoError(t, tb.Player().JumpTo(3))
 
-	require.NoError(t, tb.panelAction(panelBtnPrev, panelGID))
+	require.NoError(t, tb.panelAction(playerPanelBtnPrev, panelGID))
 
 	assert.Equal(t, 2, tb.Player().QueueSnapshot().CurrentIndex)
 }
@@ -332,23 +459,18 @@ func TestPanelPauseButtonTogglesManualPause(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 	require.False(t, tb.Player().Paused())
 
-	require.NoError(t, tb.panelAction(panelBtnPause, panelGID))
+	require.NoError(t, tb.panelAction(playerPanelBtnPause, panelGID))
 	assert.True(t, tb.Player().Paused())
 
-	require.NoError(t, tb.panelAction(panelBtnPause, panelGID))
+	require.NoError(t, tb.panelAction(playerPanelBtnPause, panelGID))
 	assert.False(t, tb.Player().Paused())
-}
-
-func TestPanelPauseButtonLabelFollowsTheState(t *testing.T) {
-	assert.Equal(t, "Pause", pauseLabel(false))
-	assert.Equal(t, "Play", pauseLabel(true), "the button offers the action, not the state")
 }
 
 func TestPanelNextButtonKeepsWraparound(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(3)...)
 	require.NoError(t, tb.Player().JumpTo(3))
 
-	require.NoError(t, tb.panelAction(panelBtnNext, panelGID))
+	require.NoError(t, tb.panelAction(playerPanelBtnNext, panelGID))
 
 	assert.Equal(t, 1, tb.Player().QueueSnapshot().CurrentIndex, "next wraps past the last position")
 }
@@ -391,7 +513,7 @@ func TestPanelEventEnqueuesExactlyOneSoundSequence(t *testing.T) {
 func TestPanelActionErrorsAreReported(t *testing.T) {
 	tb := newPanelBot(t)
 
-	msg := tb.panelAction(panelBtnPrev, panelGID).Error()
+	msg := tb.panelAction(playerPanelBtnPrev, panelGID).Error()
 
 	assert.Contains(t, msg, "earlier track", "an empty lineup has nothing to go back to")
 }
@@ -420,9 +542,10 @@ func (tb *panelBot) registerPanel(generation uint64, messageID snowflake.ID) pan
 	return panelClick{
 		GuildID:    panelGID,
 		UserID:     panelUser,
+		ChannelID:  panelChannel,
 		MessageID:  messageID,
 		Generation: generation,
-		Action:     panelBtnNext,
+		Action:     playerPanelBtnNext,
 	}
 }
 
@@ -468,8 +591,8 @@ func TestPanelRejectsAStaleGeneration(t *testing.T) {
 	tb.registerPanel(1, panelMessage)
 
 	res := tb.resolvePanelClick(panelClick{
-		GuildID: panelGID, UserID: panelUser, MessageID: panelMessage,
-		Generation: 99, Action: panelBtnNext,
+		GuildID: panelGID, UserID: panelUser, MessageID: panelMessage, ChannelID: panelChannel,
+		Generation: 99, Action: playerPanelBtnNext,
 	})
 
 	assert.Contains(t, res.Reject, "no longer active")
@@ -479,16 +602,16 @@ func TestPanelRejectsClicksWhenNoPanelIsRegistered(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 
 	res := tb.resolvePanelClick(panelClick{
-		GuildID: panelGID, UserID: panelUser, MessageID: panelMessage,
-		Generation: 1, Action: panelBtnNext,
+		GuildID: panelGID, UserID: panelUser, MessageID: panelMessage, ChannelID: panelChannel,
+		Generation: 1, Action: playerPanelBtnNext,
 	})
 
 	assert.Contains(t, res.Reject, "no longer active")
 }
 
 func TestPanelCustomIDRoundTrips(t *testing.T) {
-	for _, action := range []string{panelBtnPrev, panelBtnPause, panelBtnNext, panelBtnEvent} {
-		gen, got, ok := parsePanelCustomID(panelCustomID(7, action))
+	for _, action := range []string{playerPanelBtnPrev, playerPanelBtnPause, playerPanelBtnNext, playerPanelBtnEvent} {
+		gen, got, ok := parsePanelCustomID(playerPanelID(7, action))
 		require.True(t, ok, "our own ids must parse")
 		assert.Equal(t, uint64(7), gen)
 		assert.Equal(t, action, got)
@@ -568,6 +691,7 @@ func TestPanelDeleteFailureStillDeactivatesTheOldPanel(t *testing.T) {
 	stale := tb.registerPanel(1, panelMessage)
 
 	tb.deletePanel = func(snowflake.ID, snowflake.ID) error { return errors.New("forbidden") }
+	tb.editPanel = func(context.Context, snowflake.ID, snowflake.ID, discord.MessageUpdate) error { return nil }
 	require.NoError(t, tb.swapPanel(panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
 		return panelMessage + 1, nil
 	}))
@@ -615,11 +739,13 @@ func TestPanelReplacementIsSerialized(t *testing.T) {
 
 // --- refresh -----------------------------------------------------------------
 
-// The panel is republished every tick even when nothing changed, so it stays the
-// latest message in the channel.
-func TestPanelRefreshRepublishesEvenWhenUnchanged(t *testing.T) {
+// The panel is rewritten on every tick even when nothing changed, so what the channel
+// shows is always current - and it is the same message, so a button being reached for
+// stays valid.
+func TestPanelRefreshRewritesTheSameMessage(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 	tb.registerPanel(1, panelMessage)
+	tb.sent = nil
 
 	before := tb.Player().QueueSnapshot().CurrentIndex
 	for range 3 {
@@ -627,28 +753,40 @@ func TestPanelRefreshRepublishesEvenWhenUnchanged(t *testing.T) {
 	}
 	assert.Equal(t, before, tb.Player().QueueSnapshot().CurrentIndex, "nothing about playback moved")
 
-	assert.Equal(t, 3, tb.sentCount(), "every tick published a new panel message")
-	assert.Equal(t, []snowflake.ID{panelMessage, panelMessage + 1, panelMessage + 2}, tb.deletedIDs(),
-		"and each one retired the message before it")
+	assert.Empty(t, tb.sentIDs(), "a refresh must never post a new message")
+	assert.Empty(t, tb.deletedIDs(), "nor delete anything")
+	assert.Equal(t, []snowflake.ID{panelMessage, panelMessage, panelMessage}, tb.editedIDs(),
+		"the same panel is rewritten every time")
 
 	cur, ok := tb.panels.active(panelGID)
 	require.True(t, ok)
-	assert.Equal(t, uint64(4), cur.generation, "the panel is now the fourth")
+	assert.Equal(t, panelMessage, cur.messageID)
+	assert.Equal(t, uint64(1), cur.generation,
+		"rewriting must not bump the generation, or it would invalidate the very button being pressed")
+
+	require.Len(t, tb.updates, 3)
+	for _, u := range tb.updates {
+		require.NotNil(t, u.Components)
+		assert.NotEmpty(t, *u.Components, "each rewrite carries the panel")
+	}
 }
 
-// A failing tick must not retire the panel.
+// A failing rewrite must be reported and must leave the panel registered, so the
+// next tick can try again and the buttons keep working.
 func TestPanelRefreshFailureKeepsThePanel(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 	tb.registerPanel(1, panelMessage)
 	tb.sent = nil
-	tb.sendErr = errors.New("boom")
+	tb.editPanel = func(context.Context, snowflake.ID, snowflake.ID, discord.MessageUpdate) error {
+		return errors.New("boom")
+	}
 
 	err := tb.refreshOnce(context.Background(), panelGID)
 
 	require.Error(t, err)
-	assert.Empty(t, tb.deletedIDs(), "a failed tick must not delete anything")
+	assert.Empty(t, tb.deletedIDs(), "a failed rewrite must not delete anything")
 	cur, ok := tb.panels.active(panelGID)
-	require.True(t, ok, "the previous panel is still active")
+	require.True(t, ok, "the panel is still registered")
 	assert.Equal(t, panelMessage, cur.messageID)
 }
 
@@ -821,7 +959,7 @@ func mappedMusicChannel(t *testing.T, tb *testBot) {
 func newPanelRecorder(t *testing.T, tb *testBot) *panelBot {
 	t.Helper()
 	pb := &panelBot{DBot: tb.DBot, nextID: panelMessage}
-	tb.createPanel = func(context.Context, snowflake.ID, ...discord.LayoutComponent) (snowflake.ID, error) {
+	tb.createPanel = func(context.Context, snowflake.ID, discord.MessageCreate) (snowflake.ID, error) {
 		if pb.sendErr != nil {
 			return 0, pb.sendErr
 		}
@@ -839,4 +977,256 @@ func newPanelRecorder(t *testing.T, tb *testBot) *panelBot {
 		return nil
 	}
 	return pb
+}
+
+// buttonEvent builds a real component interaction, so onPanelComponent itself is under
+// test rather than a hand-rolled sequence of its inner calls.
+func buttonEvent(t *testing.T, guildID, channelID, userID, messageID snowflake.ID, customID string) *events.ComponentInteractionCreate {
+	t.Helper()
+	return buttonEventRecording(t, guildID, channelID, userID, messageID, customID, nil)
+}
+
+// buttonEventRecording captures what the handler answers the interaction with.
+func buttonEventRecording(t *testing.T, guildID, channelID, userID, messageID snowflake.ID, customID string, out *[]discord.InteractionResponseType) *events.ComponentInteractionCreate {
+	t.Helper()
+
+	payload := fmt.Sprintf(`{
+	  "id":"500","application_id":"300","type":3,"token":"tok",
+	  "guild_id":"%s","channel_id":"%s",
+	  "channel":{"id":"%s","type":0},
+	  "member":{"user":{"id":"%s","username":"u"}},
+	  "message":{"id":"%s"},
+	  "data":{"custom_id":%q,"component_type":2}
+	}`, guildID, channelID, channelID, userID, messageID, customID)
+
+	var i discord.ComponentInteraction
+	require.NoError(t, i.UnmarshalJSON([]byte(payload)))
+	return &events.ComponentInteractionCreate{
+		ComponentInteraction: i,
+		Respond: func(kind discord.InteractionResponseType, data discord.InteractionResponseData, _ ...rest.RequestOpt) error {
+			_ = data
+			if out != nil {
+				*out = append(*out, kind)
+			}
+			return nil
+		},
+	}
+}
+
+// A component interaction must carry the message the button lives on; without it the
+// stale check can never match and every click is refused.
+func TestButtonEventCarriesItsMessage(t *testing.T) {
+	e := buttonEvent(t, panelGID, panelChannel, panelUser, panelMessage, playerPanelID(1, playerPanelBtnNext))
+
+	assert.Equal(t, panelMessage, e.Message.ID)
+	assert.Equal(t, panelGID, *e.GuildID())
+	assert.Equal(t, panelUser, e.User().ID)
+}
+
+// The update lock spans the whole click, not just its publish: while it is held a
+// button must not act and no panel may be sent. Without that a timer tick can retire
+// the panel a press is acting on between the guard and the publish.
+func TestPanelClickIsSerializedAgainstUpdates(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(4)...)
+	tb.registerPanel(1, panelMessage)
+	pb := &panelBot{DBot: tb.DBot, nextID: panelMessage + 1, record: true}
+	tb.editPanel = func(_ context.Context, _, msgID snowflake.ID, u discord.MessageUpdate) error {
+		pb.mu.Lock()
+		pb.edited = append(pb.edited, msgID)
+		pb.updates = append(pb.updates, u)
+		pb.mu.Unlock()
+		return nil
+	}
+
+	var got []discord.InteractionResponseType
+	var mu sync.Mutex
+
+	unlock := tb.panels.lockUpdate(panelGID)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tb.onPanelComponent(buttonEventRecording(t, panelGID, panelChannel, panelUser, panelMessage,
+			playerPanelID(1, playerPanelBtnNext), &got))
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	answers := len(got)
+	mu.Unlock()
+	assert.Equal(t, 0, answers, "a click must not answer while an update is in flight")
+	assert.Equal(t, 1, tb.Player().QueueSnapshot().CurrentIndex, "nor act on the player")
+
+	unlock()
+	<-done
+
+	assert.Equal(t, []discord.InteractionResponseType{discord.InteractionResponseTypeUpdateMessage}, got,
+		"and it answers once the update finishes")
+	assert.Equal(t, 2, tb.Player().QueueSnapshot().CurrentIndex, "having applied its action")
+}
+
+// A panel we could not delete must stop looking live, or people click it and are
+// told the panel is gone. It is replaced with a note saying so.
+func TestPanelDeleteFailureRetiresTheOldMessage(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(2)...)
+	tb.registerPanel(1, panelMessage)
+
+	tb.deletePanel = func(snowflake.ID, snowflake.ID) error { return errors.New("missing permissions") }
+
+	var retired struct {
+		mu        sync.Mutex
+		id        snowflake.ID
+		content   string
+		callCount int
+	}
+	tb.editPanel = func(_ context.Context, _, msgID snowflake.ID, u discord.MessageUpdate) error {
+		retired.mu.Lock()
+		defer retired.mu.Unlock()
+		retired.id = msgID
+		if u.Content != nil {
+			retired.content = *u.Content
+		}
+		retired.callCount++
+		return nil
+	}
+
+	require.NoError(t, tb.swapPanel(panelGID, panelChannel, func(uint64) (snowflake.ID, error) {
+		return panelMessage + 1, nil
+	}))
+
+	assert.Equal(t, panelMessage, retired.id, "the message that stayed behind is rewritten")
+	assert.Contains(t, retired.content, "no longer active")
+	assert.Equal(t, 1, retired.callCount)
+}
+
+// A panel in another channel is not ours to drive, even if the ids line up.
+func TestPanelRejectsAClickFromAnotherChannel(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(2)...)
+	tb.registerPanel(1, panelMessage)
+
+	res := tb.resolvePanelClick(panelClick{
+		GuildID: panelGID, UserID: panelUser,
+		ChannelID: panelChannel + 1, // the panel lives in panelChannel
+		MessageID: panelMessage, Generation: 1, Action: playerPanelBtnNext,
+	})
+
+	assert.Contains(t, res.Reject, "another channel")
+}
+
+// The bug this model fixes: with a fresh panel posted every few seconds, a button was
+// retired roughly ten seconds after it appeared - about how long a person takes to
+// read a queue and reach for a control. Rewriting in place keeps the same message and
+// the same generation, so the press always lands.
+func TestPanelButtonStaysValidAcrossRefreshes(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(4)...)
+	tb.registerPanel(1, panelMessage)
+
+	first, ok := tb.panels.active(panelGID)
+	require.True(t, ok)
+
+	// a tick passes with the panel on screen, and again after playback moves on
+	require.NoError(t, tb.refreshOnce(context.Background(), panelGID))
+	require.NoError(t, tb.Player().JumpTo(2))
+	require.NoError(t, tb.refreshOnce(context.Background(), panelGID))
+
+	after, ok := tb.panels.active(panelGID)
+	require.True(t, ok)
+	assert.Equal(t, first.messageID, after.messageID, "the message on screen never changed")
+	assert.Equal(t, first.generation, after.generation, "nor the generation it is registered under")
+
+	// the generation baked into the buttons must match the registered one, or the
+	// next press is rejected even though nothing looks wrong
+	for _, u := range tb.updates {
+		for _, b := range panelButtonsOf(t, discord.MessageCreate{Components: *u.Components}) {
+			gen, _, ok := parsePanelCustomID(b.CustomID)
+			require.True(t, ok)
+			assert.Equal(t, after.generation, gen,
+				"a rewritten button must carry the generation the panel is registered under")
+		}
+	}
+
+	res := tb.resolvePanelClick(panelClick{
+		GuildID: panelGID, UserID: panelUser, ChannelID: panelChannel,
+		MessageID: first.messageID, Generation: first.generation,
+		Action: playerPanelBtnNext,
+	})
+	assert.Empty(t, res.Reject, "a button on the visible panel still works")
+}
+
+// /player in the channel that already holds the panel must refresh it, not post a
+// second one.
+func TestHandlePlayerIsIdempotentInTheSameChannel(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(3)...)
+	require.NoError(t, tb.handlePlayer(context.Background(), slashEvent(t, panelGID, panelChannel, panelUser)))
+
+	first, _ := tb.panels.active(panelGID)
+	tb.replies = nil
+	tb.sent = nil
+
+	require.NoError(t, tb.handlePlayer(context.Background(), slashEvent(t, panelGID, panelChannel, panelUser)))
+
+	assert.Empty(t, tb.sentIDs(), "no second panel is posted")
+	assert.Empty(t, tb.deletedIDs(), "and nothing is deleted")
+	assert.Equal(t, []snowflake.ID{panelMessage}, tb.editedIDs(), "the same panel is rewritten")
+	assert.Len(t, tb.replies, 1, "but the command is still answered")
+
+	after, _ := tb.panels.active(panelGID)
+	assert.Equal(t, first.messageID, after.messageID)
+}
+
+// Every button press must answer the interaction exactly once, inside discord's
+// deadline. Answering nothing is what produces "didn't respond in time".
+func TestEveryButtonPressAnswersExactlyOnce(t *testing.T) {
+	for _, action := range []string{
+		playerPanelBtnPrev, playerPanelBtnPause, playerPanelBtnNext, playerPanelBtnEvent,
+	} {
+		t.Run(action, func(t *testing.T) {
+			// a real store: Event reads the sound library, and a bot without one is a
+			// state production never reaches
+			tb := newTestBot(t)
+			tb.GuildID = panelGID
+			_ = tb.MusicPlayer.Close()
+			tb.SetPlayer(player.NewPlayer())
+			require.NoError(t, tb.MusicPlayer.SetVC(stubConn{gid: panelGID}, panelBotVC))
+
+			c := cache.New(cache.WithCaches(cache.FlagsAll))
+			c.AddVoiceState(discord.VoiceState{GuildID: panelGID, UserID: panelUser, ChannelID: &panelBotVC})
+			tb.Client = &bot.Client{Caches: c}
+
+			require.NoError(t, tb.MusicPlayer.EnqueueMany(panelTracks(4)))
+
+			panel := &panelBot{DBot: tb.DBot, nextID: panelMessage + 1, record: true}
+			panel.registerPanel(1, panelMessage)
+
+			var got []discord.InteractionResponseType
+			panel.onPanelComponent(buttonEventRecording(t, panelGID, panelChannel, panelUser, panelMessage,
+				playerPanelID(1, action), &got))
+
+			require.Len(t, got, 1, "%s must answer exactly once", action)
+
+			// prev at position 1 and event with no sounds both genuinely fail, so they
+			// answer ephemerally; anything that worked rewrites the panel
+			worked := action == playerPanelBtnPause || action == playerPanelBtnNext
+			want := discord.InteractionResponseTypeCreateMessage
+			if worked {
+				want = discord.InteractionResponseTypeUpdateMessage
+			}
+			assert.Equal(t, want, got[0], "%s answered the wrong way", action)
+		})
+	}
+}
+
+// A rejected press answers ephemerally and touches nothing else.
+func TestRejectedPressStillAnswers(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(2)...)
+	tb.registerPanel(1, panelMessage)
+
+	var got []discord.InteractionResponseType
+	// a generation the panel does not carry
+	tb.onPanelComponent(buttonEventRecording(t, panelGID, panelChannel, panelUser, panelMessage,
+		playerPanelID(99, playerPanelBtnNext), &got))
+
+	require.Len(t, got, 1, "a refused press must still answer")
+	assert.Equal(t, discord.InteractionResponseTypeCreateMessage, got[0],
+		"and it says why, privately")
 }

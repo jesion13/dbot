@@ -18,35 +18,11 @@ import (
 	"github.com/disgoorg/snowflake/v2"
 )
 
-const (
-	panelBtnPrefix = "dbot:panel:"
-	panelBtnPrev   = "prev"
-	panelBtnPause  = "pause"
-	panelBtnNext   = "next"
-	panelBtnEvent  = "event"
-
-	// the one place the refresh cadence is set
-	panelRefresh = 10 * time.Second
-)
-
-const (
-	// how much of the lineup either side of the current track the panel shows
-	panelBefore = 3
-	panelAfter  = 10
-	// points at the playing row. The arrow is the only marker, and every other row is
-	// padded to the same width, so the numbers stay flush left and aligned.
-	panelNowMarker = "▶ "
-)
-
-// panelCustomID carries the generation the panel was published with. A click from a
-// panel that has since been replaced carries an older one, so it is refused even if
-// the old message was never deleted.
-func panelCustomID(generation uint64, action string) string {
-	return fmt.Sprintf("%s%d:%s", panelBtnPrefix, generation, action)
-}
+// the one place the refresh cadence is set
+const panelRefresh = 10 * time.Second
 
 func parsePanelCustomID(customID string) (generation uint64, action string, ok bool) {
-	rest, found := strings.CutPrefix(customID, panelBtnPrefix)
+	rest, found := strings.CutPrefix(customID, playerPanelBtnPrefix)
 	if !found {
 		return 0, "", false
 	}
@@ -78,117 +54,6 @@ func (d *DBot) voiceGuard(gid, userID snowflake.ID) string {
 	return ""
 }
 
-// --- layout ------------------------------------------------------------------
-
-// panelRow is one visible queue line. Position is absolute and 1-based, so a number
-// the user read minutes ago still points at the same track.
-type panelRow struct {
-	Position int
-	Title    string
-	Current  bool
-}
-
-// panelWindow is the slice of the lineup the panel shows, clipped to what exists.
-// It is derived from CurrentIndex alone: nothing here tracks playback history.
-func panelWindow(s player.QueueSnapshot) []panelRow {
-	n := len(s.Tracks)
-	if n == 0 {
-		return nil
-	}
-
-	first, last := 1, min(n, panelAfter)
-	if s.CurrentIndex > 0 {
-		first = max(1, s.CurrentIndex-panelBefore)
-		last = min(n, s.CurrentIndex+panelAfter)
-	}
-
-	rows := make([]panelRow, 0, last-first+1)
-	for i := first; i <= last; i++ {
-		rows = append(rows, panelRow{
-			Position: i,
-			Title:    s.Tracks[i-1].Title,
-			Current:  i == s.CurrentIndex,
-		})
-	}
-	return rows
-}
-
-type panelRender struct {
-	components []discord.LayoutComponent
-}
-
-func renderPanel(generation uint64, s player.QueueSnapshot) panelRender {
-	head := panelHead(s)
-	body := panelBody(panelWindow(s))
-	foot := panelFoot(s)
-	return panelRender{components: panelComponents(generation, head, body, foot, s.Paused)}
-}
-
-func panelHead(s player.QueueSnapshot) string {
-	status := "Stopped"
-	if s.Current() != nil {
-		status = "Playing"
-		if s.Paused {
-			status = "Paused"
-		}
-	}
-	return "## DBot Player\n" + status
-}
-
-func panelBody(rows []panelRow) string {
-	if len(rows) == 0 {
-		return "Nothing queued yet."
-	}
-
-	var b strings.Builder
-	for _, r := range rows {
-		marker := strings.Repeat(" ", len([]rune(panelNowMarker)))
-		if r.Current {
-			marker = panelNowMarker
-		}
-		fmt.Fprintf(&b, "%s%d. %s\n", marker, r.Position, displayTitle(r.Title))
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
-func panelFoot(s player.QueueSnapshot) string {
-	switch s.SoundWait {
-	case 0:
-		return ""
-	case 1:
-		return "1 sound sequence waiting"
-	default:
-		return fmt.Sprintf("%d sound sequences waiting", s.SoundWait)
-	}
-}
-
-func panelComponents(generation uint64, head, body, foot string, paused bool) []discord.LayoutComponent {
-	id := func(action string) string { return panelCustomID(generation, action) }
-
-	sub := []discord.ContainerSubComponent{
-		discord.NewTextDisplay(head),
-		discord.NewTextDisplay(body),
-	}
-	if foot != "" {
-		sub = append(sub, discord.NewTextDisplay(foot))
-	}
-	sub = append(sub, discord.ActionRowComponent{}.WithComponents(
-		discord.NewSecondaryButton("Previous", id(panelBtnPrev)),
-		discord.NewSecondaryButton(pauseLabel(paused), id(panelBtnPause)),
-		discord.NewSecondaryButton("Next", id(panelBtnNext)),
-		discord.NewSecondaryButton("Event", id(panelBtnEvent)),
-	))
-
-	return []discord.LayoutComponent{discord.NewContainer(sub...)}
-}
-
-func pauseLabel(paused bool) string {
-	if paused {
-		return "Play"
-	}
-	return "Pause"
-}
-
 // --- registry ----------------------------------------------------------------
 
 type panelEntry struct {
@@ -208,6 +73,29 @@ type panelState struct {
 type panelRegistry struct {
 	mu    sync.Mutex
 	byGID map[snowflake.ID]*panelState
+	// one update lock per guild, held across a whole panel update rather than just
+	// the send, so the timer and a button press cannot interleave
+	locks map[snowflake.ID]*sync.Mutex
+}
+
+// lockUpdate serializes a whole panel update for one guild and returns its unlock.
+// The registry mutex alone is not enough: it only covers the send, so a timer tick
+// could still retire the panel a button press is acting on, and the panel that press
+// just sent would be deleted moments later.
+func (r *panelRegistry) lockUpdate(gid snowflake.ID) func() {
+	r.mu.Lock()
+	if r.locks == nil {
+		r.locks = map[snowflake.ID]*sync.Mutex{}
+	}
+	l, ok := r.locks[gid]
+	if !ok {
+		l = &sync.Mutex{}
+		r.locks[gid] = l
+	}
+	r.mu.Unlock()
+
+	l.Lock()
+	return l.Unlock
 }
 
 // publish sends the guild's next panel and registers it, returning the panel it
@@ -246,6 +134,21 @@ func (r *panelRegistry) publish(gid, channelID snowflake.ID, send func(generatio
 	return prev, nil
 }
 
+// update rewrites the guild's panel where it already is. The message id and the
+// generation both stay the same, so a button the user is reaching for keeps working
+// across the edit - which is the whole point. Posting a fresh message every few
+// seconds instead would retire panels while they were being read.
+func (r *panelRegistry) update(gid snowflake.ID, edit func(panelEntry) error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	st := r.byGID[gid]
+	if st == nil {
+		return nil
+	}
+	return edit(st.entry)
+}
+
 func (r *panelRegistry) active(gid snowflake.ID) (panelEntry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -268,9 +171,9 @@ func (r *panelRegistry) stopWorker(gid snowflake.ID) {
 
 // --- lifecycle ---------------------------------------------------------------
 
-// swapPanel publishes a replacement and only then retires the old one. The send
-// happens under the registry lock; the delete happens after the replacement is
-// registered, so a failure anywhere leaves a working panel behind.
+// swapPanel publishes a replacement and only then retires the old one. The delete
+// happens after the replacement is registered, so a failure anywhere leaves a
+// working panel behind. Callers must already hold the guild's update lock.
 func (d *DBot) swapPanel(gid, channelID snowflake.ID, send func(generation uint64) (snowflake.ID, error)) error {
 	prev, err := d.panels.publish(gid, channelID, send)
 	if err != nil {
@@ -283,9 +186,30 @@ func (d *DBot) swapPanel(gid, channelID snowflake.ID, send func(generation uint6
 	// the old panel is already unregistered, so its buttons are refused even if this
 	// delete fails and the message stays sitting in the channel
 	if err := d.deletePanelMessage(prev.channelID, prev.messageID); err != nil {
-		slog.Error("player panel delete failed", slog.Any("error", err))
+		slog.Error("player panel delete failed",
+			slog.String("channel", prev.channelID.String()),
+			slog.String("message", prev.messageID.String()),
+			slog.Any("error", err))
+		d.retirePanel(prev)
 	}
 	return nil
+}
+
+// retirePanel replaces a panel we could not delete with a note saying so. A stale
+// panel that still looks live is worse than useless: people click it and are told the
+// panel is gone. Best effort - if this fails too the guard still refuses the click.
+func (d *DBot) retirePanel(prev *panelEntry) {
+	content := "_(this player panel is no longer active)_"
+	update := discord.MessageUpdate{Content: &content}
+	if d.editPanel != nil {
+		if err := d.editPanel(d.botCtx(), prev.channelID, prev.messageID, update); err != nil {
+			slog.Error("player panel retire failed", slog.Any("error", err))
+		}
+		return
+	}
+	if _, err := d.Client.Rest.UpdateMessage(prev.channelID, prev.messageID, update); err != nil {
+		slog.Error("player panel retire failed", slog.Any("error", err))
+	}
 }
 
 // handlePlayer publishes the guild's panel in this channel and retires whatever was
@@ -298,9 +222,33 @@ func (d *DBot) handlePlayer(ctx context.Context, e *events.ApplicationCommandInt
 	}
 	channelID := e.Channel().ID()
 
+	unlock := d.panels.lockUpdate(*gid)
+	defer unlock()
+
+	// already in this channel: rewrite it rather than post a second one, so /player
+	// stays idempotent. The interaction is still answered first - the panel is not
+	// the reply here, so without this the command would time out.
+	if cur, ok := d.panels.active(*gid); ok && cur.channelID == channelID {
+		if _, err := d.respondPanel(e.ID(), e.Token(), discord.MessageCreate{
+			Content: "player panel refreshed",
+			Flags:   discord.MessageFlagEphemeral,
+		}); err != nil {
+			return fmt.Errorf("refresh player panel: %w", err)
+		}
+		if err := d.panels.update(*gid, func(e panelEntry) error {
+			return d.editPanelMessage(ctx, e.channelID, e.messageID,
+				buildPlayerPanelV2(e.generation, d.Player().QueueSnapshot()))
+		}); err != nil {
+			return fmt.Errorf("refresh player panel: %w", err)
+		}
+		d.startPanelWorker(*gid)
+		return nil
+	}
+
+	// the panel is the command's reply, so the interaction is answered inside
+	// discord's deadline and we get the message back to register
 	err := d.swapPanel(*gid, channelID, func(generation uint64) (snowflake.ID, error) {
-		r := renderPanel(generation, d.Player().QueueSnapshot())
-		return d.respondPanel(e.ID(), e.Token(), discord.NewMessageCreateV2(r.components...))
+		return d.respondPanel(e.ID(), e.Token(), buildPlayerPanelV2(generation, d.Player().QueueSnapshot()))
 	})
 	if err != nil {
 		return fmt.Errorf("create player panel: %w", err)
@@ -365,9 +313,11 @@ func (d *DBot) ensureOnce(ctx context.Context) error {
 		return fmt.Errorf("music channel id %q: %w", ch.Chid, err)
 	}
 
+	unlock := d.panels.lockUpdate(d.GuildID)
+	defer unlock()
+
 	err = d.swapPanel(d.GuildID, channelID, func(generation uint64) (snowflake.ID, error) {
-		r := renderPanel(generation, d.Player().QueueSnapshot())
-		return d.createPanelMessage(ctx, channelID, r.components...)
+		return d.createPanelMessage(ctx, channelID, buildPlayerPanelV2(generation, d.Player().QueueSnapshot()))
 	})
 	if err != nil {
 		return err
@@ -392,8 +342,8 @@ func (r *panelRegistry) setWorker(gid snowflake.ID, cancel context.CancelFunc) {
 	st.cancel = cancel
 }
 
-// refreshPanel republishes on every tick, whether or not anything changed: the panel
-// is meant to be the latest message in the channel, not merely an accurate one.
+// refreshPanel rewrites the panel on every tick, whether or not anything changed, so
+// what the channel shows is always current.
 func (d *DBot) refreshPanel(ctx context.Context, gid snowflake.ID) {
 	t := time.NewTicker(panelRefresh)
 	defer t.Stop()
@@ -412,15 +362,15 @@ func (d *DBot) refreshPanel(ctx context.Context, gid snowflake.ID) {
 }
 
 // refreshOnce is one tick, separated so a test can drive it without waiting out the
-// interval. It always publishes; there is no "nothing changed" short circuit.
+// interval. It always rewrites the panel; there is no "nothing changed" short
+// circuit, so the message in the channel is always the current one.
 func (d *DBot) refreshOnce(ctx context.Context, gid snowflake.ID) error {
-	cur, ok := d.panels.active(gid)
-	if !ok {
-		return nil
-	}
-	return d.swapPanel(gid, cur.channelID, func(generation uint64) (snowflake.ID, error) {
-		r := renderPanel(generation, d.Player().QueueSnapshot())
-		return d.createPanelMessage(ctx, cur.channelID, r.components...)
+	unlock := d.panels.lockUpdate(gid)
+	defer unlock()
+
+	return d.panels.update(gid, func(e panelEntry) error {
+		return d.editPanelMessage(ctx, e.channelID, e.messageID,
+			buildPlayerPanelV2(e.generation, d.Player().QueueSnapshot()))
 	})
 }
 
@@ -430,6 +380,7 @@ func (d *DBot) refreshOnce(ctx context.Context, gid snowflake.ID) error {
 type panelClick struct {
 	GuildID    snowflake.ID
 	UserID     snowflake.ID
+	ChannelID  snowflake.ID
 	MessageID  snowflake.ID
 	Generation uint64
 	Action     string
@@ -448,29 +399,48 @@ func (d *DBot) resolvePanelClick(c panelClick) panelClickResult {
 		return panelClickResult{Reject: reason}
 	}
 	cur, ok := d.panels.active(c.GuildID)
-	if !ok || cur.messageID != c.MessageID || cur.generation != c.Generation {
-		return panelClickResult{Reject: "this panel is no longer active, run /player again"}
+	switch {
+	case !ok:
+		slog.Warn("player panel: click with no panel registered",
+			slog.String("message", c.MessageID.String()))
+	case cur.channelID != c.ChannelID:
+		slog.Warn("player panel: click from another channel",
+			slog.String("clicked", c.ChannelID.String()),
+			slog.String("active", cur.channelID.String()))
+		return panelClickResult{Reject: "this panel belongs to another channel, run /player here"}
+	case cur.messageID != c.MessageID:
+		slog.Warn("player panel: click from a different message",
+			slog.String("clicked", c.MessageID.String()),
+			slog.String("active", cur.messageID.String()),
+			slog.Duration("age", time.Since(snowflakeTimestamp(c.MessageID))-time.Since(snowflakeTimestamp(cur.messageID))),
+			slog.Bool("clickedChannelMatches", c.ChannelID == cur.channelID))
+	case cur.generation != c.Generation:
+		slog.Warn("player panel: click from an older generation",
+			slog.Uint64("clicked", c.Generation),
+			slog.Uint64("active", cur.generation))
+	default:
+		return panelClickResult{Panel: cur}
 	}
-	return panelClickResult{Panel: cur}
+	return panelClickResult{Reject: "this panel is no longer active, run /player again"}
 }
 
 // panelAction maps one button onto the existing player or sound path. It builds no
 // queue of its own and keeps no state.
 func (d *DBot) panelAction(action string, gid snowflake.ID) error {
 	switch action {
-	case panelBtnPrev:
+	case playerPanelBtnPrev:
 		if err := d.Player().Previous(); err != nil {
 			return errors.New(queueErrText(err, "nothing to go back to"))
 		}
-	case panelBtnPause:
+	case playerPanelBtnPause:
 		if err := d.Player().TogglePause(); err != nil {
 			return errors.New(queueErrText(err, "could not toggle pause"))
 		}
-	case panelBtnNext:
+	case playerPanelBtnNext:
 		if err := d.Player().SkipNext(); err != nil {
 			return errors.New(queueErrText(err, "nothing to skip to"))
 		}
-	case panelBtnEvent:
+	case playerPanelBtnEvent:
 		return d.queueRandomSound(gid.String())
 	default:
 		return fmt.Errorf("unknown player panel action %q", action)
@@ -491,10 +461,16 @@ func (d *DBot) onPanelComponent(e *events.ComponentInteractionCreate) {
 	c := panelClick{
 		GuildID:    *gid,
 		UserID:     e.User().ID,
+		ChannelID:  e.Channel().ID(),
 		MessageID:  e.Message.ID,
 		Generation: generation,
 		Action:     action,
 	}
+
+	// the lock spans the guard, the action and the publish, so a timer tick cannot
+	// retire the panel this press is acting on, or the panel it is about to send
+	unlock := d.panels.lockUpdate(*gid)
+	defer unlock()
 
 	res := d.resolvePanelClick(c)
 	if res.Reject != "" {
@@ -507,14 +483,12 @@ func (d *DBot) onPanelComponent(e *events.ComponentInteractionCreate) {
 		return
 	}
 
-	// the new panel is the reply: one response, inside discord's deadline, and the
-	// queue is up to date without waiting for the tick
-	err := d.swapPanel(*gid, res.Panel.channelID, func(gen uint64) (snowflake.ID, error) {
-		r := renderPanel(gen, d.Player().QueueSnapshot())
-		return d.respondPanel(e.ID(), e.Token(), discord.NewMessageCreateV2(r.components...))
-	})
-	if err != nil {
-		slog.Error("player panel publish failed", slog.Any("error", err))
+	// The interaction response is the panel rewrite: one call that answers inside
+	// discord's deadline and leaves the refreshed panel on the message the user is
+	// already looking at. Nothing must answer twice, and nothing may answer nothing.
+	panel := buildPlayerPanelV2(res.Panel.generation, d.Player().QueueSnapshot())
+	if err := e.UpdateMessage(discord.NewMessageUpdateV2(panel.Components...)); err != nil {
+		slog.Error("player panel update failed", slog.Any("error", err))
 		d.replyEphemeral(e, "could not refresh the player panel: "+err.Error())
 	}
 }
@@ -555,11 +529,27 @@ func randomSoundSequence(db *store.Queries, gid string) (player.SoundSequence, e
 //
 // Replaced in tests so nothing here needs a client or a network.
 
-func (d *DBot) createPanelMessage(ctx context.Context, channelID snowflake.ID, comps ...discord.LayoutComponent) (snowflake.ID, error) {
-	if d.createPanel != nil {
-		return d.createPanel(ctx, channelID, comps...)
+func (d *DBot) editPanelMessage(ctx context.Context, channelID, messageID snowflake.ID, msg discord.MessageCreate) error {
+	update := discord.NewMessageUpdateV2(msg.Components...)
+	if d.editPanel != nil {
+		return d.editPanel(ctx, channelID, messageID, update)
 	}
-	m, err := d.Client.Rest.CreateMessage(channelID, discord.NewMessageCreateV2(comps...))
+	_, err := d.Client.Rest.UpdateMessage(channelID, messageID, update)
+	return err
+}
+
+// snowflakeTimestamp turns a discord id back into a time, so a log line can say how
+// far out of date the panel someone clicked was.
+func snowflakeTimestamp(id snowflake.ID) time.Time {
+	const discordEpoch = 1420070400000 // 2015-01-01T00:00:00Z in unix millis
+	return time.UnixMilli(int64(id>>22) + discordEpoch)
+}
+
+func (d *DBot) createPanelMessage(ctx context.Context, channelID snowflake.ID, msg discord.MessageCreate) (snowflake.ID, error) {
+	if d.createPanel != nil {
+		return d.createPanel(ctx, channelID, msg)
+	}
+	m, err := d.Client.Rest.CreateMessage(channelID, msg)
 	if err != nil {
 		return 0, err
 	}

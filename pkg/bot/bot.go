@@ -62,8 +62,9 @@ type DBot struct {
 
 	// discord seams for the panel, replaced in tests
 	answerPanel func(snowflake.ID, string, discord.MessageCreate) (snowflake.ID, error)
-	createPanel func(context.Context, snowflake.ID, ...discord.LayoutComponent) (snowflake.ID, error)
+	createPanel func(context.Context, snowflake.ID, discord.MessageCreate) (snowflake.ID, error)
 	deletePanel func(channelID, messageID snowflake.ID) error
+	editPanel   func(context.Context, snowflake.ID, snowflake.ID, discord.MessageUpdate) error
 }
 
 // Never nil: tests build a DBot by hand, and selecting on a nil context panics.
@@ -245,7 +246,6 @@ func Start(ctx context.Context, client *bot.Client, dbstore *db.Store) *DBot {
 	d.RegisterEventListiners()
 
 	d.StartScheduler()
-	d.interfaceLoop()
 
 	err = client.OpenGateway(ctx)
 	if err != nil {
