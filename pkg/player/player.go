@@ -353,45 +353,64 @@ func (p *Player) SkipNextTracks() (from, to *Track, err error) {
 // Idle at the end of a lineup resumes from the last entry. Entries are never removed,
 // reordered or renumbered.
 func (p *Player) Previous() error {
+	_, err := p.PreviousTrack()
+	return err
+}
+
+// PreviousTrack is Previous plus the track it selected, captured under the same lock
+// as the cursor move. A caller that reports the move must use this rather than read
+// the lineup afterwards: playback can advance on its own in between.
+func (p *Player) PreviousTrack() (*Track, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 
 	switch {
 	case p.cursor > 0:
 		p.cursor--
 	case p.cursor == 0:
-		return ErrNoPreviousTrack
+		return nil, ErrNoPreviousTrack
 	case len(p.lineup) > 0:
 		p.cursor = len(p.lineup) - 1
 	default:
-		return ErrNoPreviousTrack
+		return nil, ErrNoPreviousTrack
 	}
 
+	t := *p.lineup[p.cursor]
 	p.startLocked()
-	return nil
+	return &t, nil
 }
 
 // 1-based, the same numbering QueueSnapshot reports and the text commands display.
 // Entries before and after it are left exactly where they are.
 func (p *Player) JumpTo(position int) error {
+	_, err := p.JumpToTrack(position)
+	return err
+}
+
+// JumpToTrack is JumpTo plus the track it selected, captured under the same lock as
+// the cursor move. A caller that reports the move must use this rather than read the
+// lineup afterwards: playback can advance on its own in between.
+func (p *Player) JumpToTrack(position int) (*Track, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	if position < 1 || position > len(p.lineup) {
-		return fmt.Errorf("%w: %d (1-%d)", ErrInvalidPosition, position, len(p.lineup))
+		return nil, fmt.Errorf("%w: %d (1-%d)", ErrInvalidPosition, position, len(p.lineup))
 	}
 	if p.cursor == position-1 {
-		return nil // already there
+		t := *p.lineup[p.cursor]
+		return &t, nil // already there
 	}
 
 	p.cursor = position - 1
+	t := *p.lineup[p.cursor]
 	p.startLocked()
-	return nil
+	return &t, nil
 }
 
 // The lineup itself is never touched.

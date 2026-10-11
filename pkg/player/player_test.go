@@ -1097,3 +1097,146 @@ func requirePlaying(t *testing.T, got *Track, want, msg string) {
 	require.NotNil(t, got, msg)
 	assert.Equal(t, want, got.Title, msg)
 }
+
+// --- PreviousTrack / JumpToTrack ---------------------------------------------
+
+// The destination comes out of the same critical section as the cursor move, so a
+// caller reporting the move cannot name a track playback has already left.
+func TestPreviousTrackReportsWhatItSelected(t *testing.T) {
+	t.Run("preceding position", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		awaitPlaying(t, p, "b")
+
+		to, err := p.PreviousTrack()
+		require.NoError(t, err)
+		requirePlaying(t, to, "a", "the position before b")
+
+		awaitPlaying(t, p, "a")
+		assert.Equal(t, 1, playing(p))
+	})
+
+	t.Run("position 1 has no earlier track", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+
+		to, err := p.PreviousTrack()
+		require.ErrorIs(t, err, ErrNoPreviousTrack)
+		assert.Nil(t, to)
+		assert.Equal(t, 1, playing(p), "playback is untouched")
+	})
+
+	t.Run("idle resumes from the last entry", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		awaitPlaying(t, p, "b")
+		p.endTrack(2)
+		await(t, "idle at the end", func() bool { return playing(p) == 0 })
+
+		to, err := p.PreviousTrack()
+		require.NoError(t, err)
+		requirePlaying(t, to, "b", "the last entry")
+
+		awaitPlaying(t, p, "b")
+		assert.Equal(t, 2, playing(p))
+	})
+
+	t.Run("empty lineup", func(t *testing.T) {
+		p := newFake(t)
+
+		to, err := p.PreviousTrack()
+		require.ErrorIs(t, err, ErrNoPreviousTrack)
+		assert.Nil(t, to)
+	})
+
+	t.Run("closed player", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a")}))
+		awaitPlaying(t, p, "a")
+		require.NoError(t, p.Close())
+
+		to, err := p.PreviousTrack()
+		require.ErrorIs(t, err, ErrClosed)
+		assert.Nil(t, to)
+	})
+}
+
+func TestJumpToTrackReportsWhatItSelected(t *testing.T) {
+	t.Run("lands on the requested position", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+
+		to, err := p.JumpToTrack(3)
+		require.NoError(t, err)
+		requirePlaying(t, to, "c", "the requested position")
+
+		awaitPlaying(t, p, "c")
+		assert.Equal(t, 3, playing(p))
+	})
+
+	t.Run("out of range changes nothing", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+		awaitPlaying(t, p, "a")
+		before := p.QueueSnapshot()
+
+		to, err := p.JumpToTrack(9)
+		require.ErrorIs(t, err, ErrInvalidPosition)
+		assert.Nil(t, to)
+		assert.Equal(t, before, p.QueueSnapshot())
+		assert.Equal(t, 1, playing(p))
+	})
+
+	t.Run("closed player", func(t *testing.T) {
+		p := newFake(t)
+		require.NoError(t, p.EnqueueMany([]Track{track("a")}))
+		awaitPlaying(t, p, "a")
+		require.NoError(t, p.Close())
+
+		to, err := p.JumpToTrack(1)
+		require.ErrorIs(t, err, ErrClosed)
+		assert.Nil(t, to)
+	})
+}
+
+// Jumping to the position already playing is a no-op, but the caller still needs a
+// track to report.
+func TestJumpToCurrentPositionReportsIt(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+
+	to, err := p.JumpToTrack(1)
+
+	require.NoError(t, err)
+	requirePlaying(t, to, "a", "already playing")
+	assert.Equal(t, 1, playing(p))
+}
+
+// The returned tracks must be copies, like SkipNextTracks'.
+func TestNavigationTracksReturnCopies(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+	awaitPlaying(t, p, "a")
+	require.NoError(t, p.JumpTo(2))
+	awaitPlaying(t, p, "b")
+
+	prev, err := p.PreviousTrack()
+	require.NoError(t, err)
+	jumped, err := p.JumpToTrack(3)
+	require.NoError(t, err)
+
+	prev.Title = "hacked"
+	jumped.Title = "hacked"
+
+	snap := p.QueueSnapshot()
+	assert.Equal(t, "a", snap.Entry(1).Title)
+	assert.Equal(t, "b", snap.Entry(2).Title)
+	assert.Equal(t, "c", snap.Entry(3).Title)
+}

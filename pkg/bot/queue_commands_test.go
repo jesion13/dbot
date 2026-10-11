@@ -38,15 +38,15 @@ func (s *stubPlayer) SkipNextTracks() (*player.Track, *player.Track, error) {
 	return s.snap.Current(), nil, nil
 }
 
-func (s *stubPlayer) Previous() error {
+func (s *stubPlayer) PreviousTrack() (*player.Track, error) {
 	s.prevs++
-	return s.prevErr
+	return s.snap.Current(), s.prevErr
 }
 
-func (s *stubPlayer) JumpTo(pos int) error {
+func (s *stubPlayer) JumpToTrack(pos int) (*player.Track, error) {
 	s.jumps++
 	s.lastJump = pos
-	return s.jumpErr
+	return s.snap.Current(), s.jumpErr
 }
 
 func (s *stubPlayer) QueueSnapshot() player.QueueSnapshot { return s.snap }
@@ -391,20 +391,30 @@ func (a *advancingPlayer) SkipNextTracks() (*player.Track, *player.Track, error)
 	return from, &t, nil
 }
 
-func (a *advancingPlayer) Previous() error {
-	if a.cursor == 0 {
-		return player.ErrNoPreviousTrack
+// mirrors Player.PreviousTrack exactly: only position 1 has nowhere to go back to,
+// and an idle player resumes from the last entry
+func (a *advancingPlayer) PreviousTrack() (*player.Track, error) {
+	switch {
+	case a.cursor > 0:
+		a.cursor--
+	case a.cursor == 0:
+		return nil, player.ErrNoPreviousTrack
+	case len(a.tracks) > 0:
+		a.cursor = len(a.tracks) - 1
+	default:
+		return nil, player.ErrNoPreviousTrack
 	}
-	a.cursor--
-	return nil
+	t := a.tracks[a.cursor]
+	return &t, nil
 }
 
-func (a *advancingPlayer) JumpTo(pos int) error {
+func (a *advancingPlayer) JumpToTrack(pos int) (*player.Track, error) {
 	if pos < 1 || pos > len(a.tracks) {
-		return player.ErrInvalidPosition
+		return nil, player.ErrInvalidPosition
 	}
 	a.cursor = pos - 1
-	return nil
+	t := a.tracks[a.cursor]
+	return &t, nil
 }
 
 func (a *advancingPlayer) QueueSnapshot() player.QueueSnapshot {
@@ -694,4 +704,70 @@ func guildMsg(content string, gid snowflake.ID) discord.Message {
 	m := msg(content, false)
 	m.GuildID = &gid
 	return m
+}
+
+// The player hands back the track it selected, so a reply can never name the wrong
+// one - the same guarantee SkipNextTracks gives.
+func TestPrevAndJumpUseTheReturnedTrack(t *testing.T) {
+	t.Run("prev", func(t *testing.T) {
+		p := lineup3()
+		p.cursor = 2
+
+		to, err := p.PreviousTrack()
+		require.NoError(t, err)
+		require.NotNil(t, to)
+		assert.Equal(t, "second", to.Title)
+		assert.Equal(t, 1, p.cursor)
+	})
+
+	t.Run("jump", func(t *testing.T) {
+		p := lineup3()
+
+		to, err := p.JumpToTrack(3)
+		require.NoError(t, err)
+		require.NotNil(t, to)
+		assert.Equal(t, "third", to.Title)
+		assert.Equal(t, 2, p.cursor)
+	})
+
+	t.Run("out of range", func(t *testing.T) {
+		p := lineup3()
+
+		to, err := p.JumpToTrack(9)
+		require.ErrorIs(t, err, player.ErrInvalidPosition)
+		assert.Nil(t, to)
+		assert.Equal(t, 0, p.cursor, "a rejected jump must not move anything")
+	})
+}
+
+// An idle player goes back to the last entry, exactly like the real one. The double
+// used to report cursor -2 here, which contradicted the contract it stands in for.
+func TestPrevFromIdleMatchesTheRealPlayer(t *testing.T) {
+	p := idleLineup3()
+
+	to, err := p.PreviousTrack()
+
+	require.NoError(t, err)
+	require.NotNil(t, to)
+	assert.Equal(t, "third", to.Title, "the last entry, not an out-of-range index")
+	assert.Equal(t, 2, p.cursor)
+}
+
+func TestPrevAtPositionOneHasNowhereToGo(t *testing.T) {
+	p := lineup3()
+
+	to, err := p.PreviousTrack()
+
+	require.ErrorIs(t, err, player.ErrNoPreviousTrack)
+	assert.Nil(t, to)
+	assert.Equal(t, 0, p.cursor, "a rejected prev must not move anything")
+}
+
+func TestPrevOnEmptyLineupIsRejected(t *testing.T) {
+	p := &advancingPlayer{}
+
+	to, err := p.PreviousTrack()
+
+	require.ErrorIs(t, err, player.ErrNoPreviousTrack)
+	assert.Nil(t, to)
 }

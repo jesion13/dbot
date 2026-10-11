@@ -22,8 +22,8 @@ const maxQueueMsgLen = 1900
 
 type queuePlayer interface {
 	SkipNextTracks() (from, to *player.Track, err error)
-	Previous() error
-	JumpTo(int) error
+	PreviousTrack() (*player.Track, error)
+	JumpToTrack(int) (*player.Track, error)
 	QueueSnapshot() player.QueueSnapshot
 }
 
@@ -79,15 +79,19 @@ func runQueueCommand(c queueCommand, p queuePlayer) string {
 		}
 		return trackText("skipped", from)
 	case "prev":
-		if err := p.Previous(); err != nil {
+		// the player returns the track it selected under the same lock as the move, so
+		// playback advancing on its own cannot make us name the wrong one
+		to, err := p.PreviousTrack()
+		if err != nil {
 			return queueErrText(err, "nothing to go back to")
 		}
-		return queueNowText(p.QueueSnapshot(), "back to")
+		return trackText("back to", to)
 	case "jump":
-		if err := p.JumpTo(c.pos); err != nil {
+		to, err := p.JumpToTrack(c.pos)
+		if err != nil {
 			return queueErrText(err, "invalid position")
 		}
-		return queueNowText(p.QueueSnapshot(), "jumped")
+		return trackText("jumped", to)
 	default:
 		return queueText(p.QueueSnapshot())
 	}
@@ -108,10 +112,6 @@ func queueErrText(err error, fallback string) string {
 	default:
 		return fallback
 	}
-}
-
-func queueNowText(s player.QueueSnapshot, verb string) string {
-	return trackText(verb, s.Current())
 }
 
 func trackText(verb string, t *player.Track) string {
