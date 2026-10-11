@@ -12,13 +12,11 @@ import (
 type Dirkey string
 
 const (
-	Prod          = "prod"
 	DirKey Dirkey = "tmp_dir"
 )
 
 var (
-	// when config is done loading this context is canceled
-	// and all <-config.Ctx.Done() will be unblocked
+	// canceled once config has loaded, unblocking every <-config.Ctx.Done()
 	Ctx, cancel = context.WithCancel(context.Background())
 
 	ENV       string

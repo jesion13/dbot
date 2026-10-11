@@ -26,7 +26,6 @@ func main() {
 
 	for k, v := range parse() {
 		params := dbot.SaveSoundParams{
-			// GID:     "438758201916129281",
 			GID:     "492318912881491981",
 			Link:    k,
 			Aliases: strings.Join(v, ","),

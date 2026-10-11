@@ -14,12 +14,10 @@ import (
 	"dbot/pkg/store"
 )
 
-// videoBackupDir is the shared backup subdir for downloaded videos. Playlist entries
-// and individual /play videos use the same one, so a video is stored once and reused.
+// Shared by playlist entries and individual /play videos, so a video is stored once.
 const videoBackupDir = "play_history"
 
-// jobAttempts is the total attempt budget for one job record (first run included).
-// Must match the fail_count < 3 filter in db/queries/queue.sql.
+// must match the fail_count < 3 filter in db/queries/queue.sql
 const jobAttempts = 3
 
 // artefactFile resolves a stored artefact path to a real file on disk.
@@ -27,8 +25,6 @@ func artefactFile(path string) string {
 	return filepath.Join(config.BACKUP_DIR, path)
 }
 
-// cachedVideo returns a usable local path for a youtube video.
-// found is false when nothing usable is cached, which means a backup job should run.
 // A genuine backup-db error is returned, never swallowed into a cache miss.
 func (d *DBot) cachedVideo(ctx context.Context, videoID, rawURL string) (path string, found bool, err error) {
 	candidates := make([]string, 0, 2)
@@ -57,18 +53,15 @@ func (d *DBot) cachedVideo(ctx context.Context, videoID, rawURL string) (path st
 	return "", false, nil
 }
 
-// backupState is the outcome of asking "does this video need a backup job?".
 type backupState int
 
 const (
-	// backupScheduled means a new job row was just inserted.
 	backupScheduled backupState = iota
-	// backupPending means an existing job is still queued or retryable.
+
 	backupPending
-	// backupUnavailable means the last attempt proved youtube will never serve this
-	// video. It stays in the snapshot; it just cannot be cached or played.
+	// youtube will never serve this one; stays in the snapshot but is unplayable
 	backupUnavailable
-	// backupError means the lookup or insert failed.
+
 	backupError
 )
 
@@ -80,8 +73,6 @@ func backupJobMeta(gid, dir, url string) (string, error) {
 	return string(meta), nil
 }
 
-// scheduleBackup decides whether this video needs a backup job, from the latest job
-// record for it. Queue rows are never deleted, so only the newest one is current.
 func (d *DBot) scheduleBackup(ctx context.Context, gid, dir, url string) (backupState, error) {
 	meta, err := backupJobMeta(gid, dir, url)
 	if err != nil {
@@ -94,17 +85,17 @@ func (d *DBot) scheduleBackup(ctx context.Context, gid, dir, url string) (backup
 	case err == nil:
 		switch {
 		case latest.Status == "unavailable":
-			// terminal: youtube refused the video, retrying will not help
+
 			return backupUnavailable, nil
 		case latest.Status != "done" && latest.FailCount < jobAttempts:
-			// still queued or still retryable
+
 			return backupPending, nil
 		}
-		// done without a usable file, or out of attempts: allow a fresh attempt
+
 	case errors.Is(err, sql.ErrNoRows):
-		// never tried
+
 	default:
-		// a broken lookup must not look like a cache hit
+
 		return backupError, fmt.Errorf("latest job for '%s': %w", url, err)
 	}
 

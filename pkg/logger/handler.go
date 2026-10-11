@@ -13,8 +13,7 @@ import (
 
 const timeFormat = "15:04:05.000"
 
-// LevelSQL is a verbosity level below slog.LevelDebug, intended for very
-// noisy per-query logging (see pkg/db) that most Debug sessions don't want.
+// Below slog.LevelDebug, for per-query logging most Debug sessions don't want.
 const LevelSQL = slog.LevelDebug - 4
 
 // Handler is a slog.Handler that renders:
@@ -27,7 +26,7 @@ type Handler struct {
 	level slog.Level
 }
 
-// NewHandler returns a Handler that logs records at level and above.
+// NewHandler logs records at level and above.
 func NewHandler(out io.Writer, level slog.Level) *Handler {
 	return &Handler{out: out, level: level}
 }
@@ -47,8 +46,6 @@ const (
 	colorWhite   = "\x1b[37;1m"
 )
 
-// maxLineWidth is the limit (excluding ANSI color codes) under which a log
-// record is rendered on a single line instead of one line per attr.
 const maxLineWidth = 120
 
 func (h *Handler) Handle(_ context.Context, r slog.Record) error {
@@ -130,8 +127,6 @@ func caller(pc uintptr) string {
 	return fmt.Sprintf("%s/%s:%d", dir, filepath.Base(frame.File), frame.Line)
 }
 
-// appendAttr flattens a into one or more "key=value" lines, recursing into
-// groups and struct-valued Any attrs with a dotted "Parent.Child" key.
 func appendAttr(lines []string, prefix string, a slog.Attr) []string {
 	key := a.Key
 	if prefix != "" {
@@ -148,16 +143,13 @@ func appendAttr(lines []string, prefix string, a slog.Attr) []string {
 	return appendAny(lines, key, a.Value.Any())
 }
 
-// appendAny renders v as a single "key=value" line, or - if v is a struct
-// (or pointer to one) that isn't a leaf type - flattens its exported fields
-// recursively with a dotted "key.Field" prefix.
+// Non-leaf structs and pointers to them are flattened into one dotted line each.
 func appendAny(lines []string, key string, v any) []string {
 	if v == nil {
 		return append(lines, fmt.Sprintf("%s=<nil>", key))
 	}
 
-	// Checked before any pointer deref/reflection, so error/Stringer
-	// implementations with a pointer receiver are respected.
+	// before any pointer deref, so pointer-receiver error/Stringer impls are respected
 	if s, ok := asLeaf(v); ok {
 		return append(lines, fmt.Sprintf("%s=%s", key, s))
 	}
@@ -190,8 +182,6 @@ func appendStruct(lines []string, prefix string, v reflect.Value) []string {
 	return lines
 }
 
-// asLeaf reports whether v should be printed as a single scalar value
-// rather than reflected into.
 func asLeaf(v any) (string, bool) {
 	switch val := v.(type) {
 	case string:

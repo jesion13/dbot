@@ -36,17 +36,15 @@ type snapshotEntry struct {
 	Position int
 }
 
-// buildSnapshot validates playlist metadata and turns it into ordered entries.
-//
 // An entry with a nil Duration is kept: that usually means the video is unavailable,
-// not that it left the playlist. An entry we cannot resolve to a video id/url at all
-// makes the whole result unusable - dropping it would silently delete a member from
-// the previous snapshot.
+// not that it left the playlist. One we cannot resolve to a video id/url at all makes
+// the whole result unusable - dropping it would silently delete a member of the
+// previous snapshot.
 //
-// KNOWN LIMITATION: `yt-dlp --flat-playlist` exits 0 and gives no entry count we can
-// cross-check, so "this entry is missing from the response" and "this entry was removed
-// from the playlist" are indistinguishable. Completeness here means "yt-dlp succeeded
-// and every entry it returned was resolvable", nothing stronger.
+// KNOWN LIMITATION: `yt-dlp --flat-playlist` exits 0 and gives no entry count to
+// cross-check, so "missing from the response" and "removed from the playlist" are
+// indistinguishable. Completeness means "yt-dlp succeeded and every entry it returned
+// was resolvable", nothing stronger.
 func buildSnapshot(meta ytdlp.PlaylistMeta) (title string, url string, entries []snapshotEntry, err error) {
 	if meta.ID == "" || strings.TrimSpace(meta.Title) == "" {
 		return "", "", nil, ErrPlaylistIncomplete
@@ -68,7 +66,7 @@ func buildSnapshot(meta ytdlp.PlaylistMeta) (title string, url string, entries [
 		entries = append(entries, snapshotEntry{
 			VideoID: id,
 			URL:     canonicalVideoURL(id),
-			// an unavailable video has no title; keep the membership anyway
+
 			Title:    orUnknown(e.Title, id),
 			Position: len(entries),
 		})
@@ -80,8 +78,7 @@ func buildSnapshot(meta ytdlp.PlaylistMeta) (title string, url string, entries [
 	return meta.Title, canonicalPlaylistURL(meta.ID), entries, nil
 }
 
-// saveSnapshot writes the playlist and its whole entry list in one transaction and
-// returns the stored playlist. On any failure the previous snapshot stays intact.
+// One transaction, so any failure leaves the previous snapshot intact.
 func (d *DBot) saveSnapshot(ctx context.Context, gid string, meta ytdlp.PlaylistMeta, synced bool) (store.Playlist, error) {
 	title, url, entries, err := buildSnapshot(meta)
 	if err != nil {
@@ -135,7 +132,7 @@ func (d *DBot) saveSnapshot(ctx context.Context, gid string, meta ytdlp.Playlist
 		return store.Playlist{}, err
 	}
 	if synced {
-		// the upsert row predates TouchPlaylistSync
+
 		pl, err = d.Store.GetPlaylist(ctx, store.GetPlaylistParams{ID: pl.ID, GuildID: gid})
 		if err != nil {
 			return store.Playlist{}, err
@@ -144,9 +141,8 @@ func (d *DBot) saveSnapshot(ctx context.Context, gid string, meta ytdlp.Playlist
 	return pl, nil
 }
 
-// syncPlaylist fetches the current playlist from YouTube and reconciles the saved
-// snapshot. A failed or incomplete fetch leaves the previous snapshot untouched and
-// returns an error - the caller must not fall back to it.
+// A failed or incomplete fetch leaves the previous snapshot untouched and returns an
+// error - the caller must not fall back to it.
 func (d *DBot) syncPlaylist(ctx context.Context, pl store.Playlist) (store.Playlist, error) {
 	meta, err := d.playlistInfo(pl.YoutubeUrl)
 	if err != nil {
@@ -156,8 +152,6 @@ func (d *DBot) syncPlaylist(ctx context.Context, pl store.Playlist) (store.Playl
 		return store.Playlist{}, fmt.Errorf("sync '%s': %w: got '%s'", pl.Title, ErrPlaylistIDMismatch, meta.ID)
 	}
 
-	// buildSnapshot rejects incomplete/empty metadata, so a truncated fetch can never
-	// be mistaken for "these videos were removed".
 	updated, err := d.saveSnapshot(ctx, pl.GuildID, meta, true)
 	if err != nil {
 		return store.Playlist{}, fmt.Errorf("sync '%s': %w", pl.Title, err)
@@ -167,7 +161,6 @@ func (d *DBot) syncPlaylist(ctx context.Context, pl store.Playlist) (store.Playl
 	return updated, nil
 }
 
-// queueResult is what happened to one snapshot.
 type queueResult struct {
 	queued      int // appended to the playback queue
 	cached      int // played from local media
@@ -180,21 +173,18 @@ func (r queueResult) total() int {
 	return r.cached + r.waiting + r.unscheduled + r.unavailable
 }
 
-// planQueue resolves every snapshot entry to something playable, in snapshot order.
-// It returns the tracks to append plus what the cache is doing about each entry.
 func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.PlaylistEntry) (tracks []player.Track, res queueResult, err error) {
 	for _, e := range entries {
 		videoID := e.YoutubeVideoID.String
 		url := e.YoutubeUrl
 
-		// a local copy wins over any job history: the file is playable regardless of
-		// what a past attempt concluded
+		// a local copy wins over any job history
 		path, found, err := d.cachedVideo(ctx, videoID, url)
 		if err != nil {
 			return nil, res, fmt.Errorf("lookup '%s': %w", url, err)
 		}
 		if found {
-			// URL stays the youtube source, Filepath the shared local copy
+
 			tracks = append(tracks, player.Track{Title: e.Title, URL: url, Filepath: artefactFile(path)})
 			res.queued++
 			res.cached++
@@ -205,7 +195,7 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 			url = canonicalVideoURL(videoID)
 		}
 		if url == "" {
-			// still a snapshot member, just not playable right now
+
 			res.unavailable++
 			continue
 		}
@@ -213,12 +203,12 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 		state, err := d.scheduleBackup(ctx, gid, videoBackupDir, url)
 		switch state {
 		case backupUnavailable:
-			// still a member of the snapshot, but youtube will not serve it and there is
-			// no local copy - queueing the url would only fail at playback time
+			// unplayable: youtube refuses it and there is no local copy, so queueing
+			// the url would only fail at playback time
 			res.unavailable++
 			continue
 		case backupError:
-			// still play from source, but say so honestly
+
 			slog.Error("backup scheduling failed", slog.Any("error", err), slog.String("url", url))
 			res.unscheduled++
 		case backupPending, backupScheduled:
@@ -231,13 +221,11 @@ func (d *DBot) planQueue(ctx context.Context, gid string, entries []store.Playli
 	return tracks, res, nil
 }
 
-// deletePlaylist soft-deletes a playlist and drops its entries in one transaction.
-//
-// It only touches the store DB: cached media lives in the backup DB and is shared, so
-// artefacts and files survive. The row itself stays so re-discovering the same
-// youtube playlist reactivates it instead of creating a duplicate.
+// Only touches the store DB: cached media lives in the shared backup DB, so artefacts
+// and files survive. The row stays, so re-discovering the same playlist reactivates it
+// instead of creating a duplicate.
 func (d *DBot) deletePlaylist(ctx context.Context, playlistID int64, guildID string) (title string, err error) {
-	// resolve first so we can report the name, and so another guild's id is a no-op
+
 	pl, err := d.Store.GetPlaylist(ctx, store.GetPlaylistParams{ID: playlistID, GuildID: guildID})
 	if err != nil {
 		return "", err
@@ -249,7 +237,7 @@ func (d *DBot) deletePlaylist(ctx context.Context, playlistID int64, guildID str
 			return fmt.Errorf("soft delete playlist: %w", err)
 		}
 		if res == 0 {
-			// deleted between the lookup and the update
+
 			return ErrPlaylistNotFound
 		}
 		if err := q.DeletePlaylistEntries(ctx, playlistID); err != nil {
@@ -263,9 +251,7 @@ func (d *DBot) deletePlaylist(ctx context.Context, playlistID int64, guildID str
 	return pl.Title, nil
 }
 
-// queueSnapshot appends a whole saved snapshot to the existing queue, in stored
-// order. The batch goes in as one operation so a playlist can never interleave
-// with another enqueue.
+// One batch, so a playlist can never interleave with another enqueue.
 func (d *DBot) queueSnapshot(ctx context.Context, gid string, playlistID int64) (queueResult, error) {
 	entries, err := d.Store.ListPlaylistEntries(ctx, playlistID)
 	if err != nil {
@@ -275,7 +261,7 @@ func (d *DBot) queueSnapshot(ctx context.Context, gid string, playlistID int64) 
 	if err != nil {
 		return res, err
 	}
-	// order and duplicates come from the snapshot and are preserved as they are
+
 	if err := d.Player().EnqueueMany(tracks); err != nil {
 		return res, err
 	}

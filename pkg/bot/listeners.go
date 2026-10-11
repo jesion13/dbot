@@ -66,8 +66,7 @@ func (d *DBot) commands(cmdHandlers map[string]cmdHandler) func(e *events.Applic
 					})
 					return
 				}
-				// a deferred handler already wrote the final response; sending another
-				// initial response here would fail (or double-post)
+				// a deferred handler already wrote the final response
 				if errors.Is(err, ErrInteractionAnswered) {
 					slog.Debug("handler answered the interaction itself", slog.String("cmd", name))
 					return
@@ -137,8 +136,7 @@ func (d *DBot) messagesListener(e *events.GuildMessageCreate) {
 	// 	return err
 	// }
 
-	// queue commands are consumed before sound matching: "!next" and friends would
-	// otherwise fuzzy-match a sound alias
+	// before sound matching: "!next" and friends would fuzzy-match a sound alias
 	if d.queueCommandListener(m) {
 		return
 	}
@@ -234,8 +232,8 @@ func isKnownSound(d *DBot, m discord.Message) {
 	}
 }
 
-// soundTrack points the player at the sound already kept in the shared backup
-// dir, so playback never re-downloads and never guesses from the path.
+// Points the player at the sound already in the shared backup dir, so playback never
+// re-downloads and never guesses from the path.
 func soundTrack(s store.Sound) player.SoundTrack {
 	return player.SoundTrack{
 		Title:    strings.Join(s.Aliases, ","),

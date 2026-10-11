@@ -948,3 +948,32 @@ func TestNavigationNeverRenumbers(t *testing.T) {
 		assert.Equal(t, tr.Title, s.Entry(i+1).Title, "position %d still means the same track", i+1)
 	}
 }
+
+// The queue display describes where playback is, not how it got there. Two players
+// that landed on the same position by different routes must therefore expose the same
+// snapshot - same lineup, same order, same numbers - because there is no per-entry
+// state left that could record the difference.
+func TestSamePositionViaDifferentRoutesHasTheSameSnapshot(t *testing.T) {
+	tracks := []Track{track("a"), track("b"), track("c"), track("d"), track("e")}
+
+	direct := newFake(t)
+	require.NoError(t, direct.EnqueueMany(tracks))
+	awaitPlaying(t, direct, "a")
+	require.NoError(t, direct.JumpTo(3))
+	awaitPlaying(t, direct, "c")
+
+	wandered := newFake(t)
+	require.NoError(t, wandered.EnqueueMany(tracks))
+	awaitPlaying(t, wandered, "a")
+	require.NoError(t, wandered.JumpTo(5))
+	awaitPlaying(t, wandered, "e")
+	require.NoError(t, wandered.Previous())
+	awaitPlaying(t, wandered, "d")
+	require.NoError(t, wandered.Previous())
+	awaitPlaying(t, wandered, "c")
+
+	a, b := direct.QueueSnapshot(), wandered.QueueSnapshot()
+	require.Equal(t, 3, a.CurrentIndex)
+	require.Equal(t, 3, b.CurrentIndex, "both routes land on the same position")
+	require.Equal(t, a, b, "same lineup, same order, same cursor after two different routes")
+}

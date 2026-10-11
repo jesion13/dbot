@@ -16,7 +16,6 @@ func (d *DBot) StartScheduler() {
 		return
 	}
 
-	// papaj
 	j, err := s.NewJob(
 		gocron.CronJob("37 21 * * *", false),
 		gocron.NewTask(d.papaj),
@@ -46,7 +45,6 @@ func (d *DBot) środowaNoc() {
 	d.playScheduledSound("/492318912881491981/sounds/srodowanoc.mp4")
 }
 
-// playScheduledSound connects if needed, then queues one sound.
 func (d *DBot) playScheduledSound(rel string) {
 	conn, _ := d.Player().Conn()
 	if conn == nil {

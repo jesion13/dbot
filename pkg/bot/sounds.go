@@ -87,9 +87,8 @@ const (
 	fuzzyThreshold = 75
 )
 
-// matchScore ranks alias against name: exact > prefix > contains > fuzzy typo tolerance.
-// Prefix ties favor the shorter alias (closest completion of what was typed).
-// Contains ties favor the longer alias (more exact substring coverage).
+// exact > prefix > contains > fuzzy typo tolerance. Prefix ties favor the shorter
+// alias (closest completion of what was typed), contains ties the longer one.
 func matchScore(alias, name string) int {
 	if alias == name {
 		return 1000
@@ -128,11 +127,10 @@ func findSound(db *store.Queries, name string, gid string) ([]store.Sound, error
 			return nil, ErrInvalidSoundCount
 		}
 
-		// one request holding N sounds; capped so the player always accepts it
 		for range min(numInt, player.MaxSoundsPerSequence) {
 			s, err := srq.rand(db, gid)
 			if err != nil {
-				// library exhausted mid-sequence: play what was picked, do not panic
+
 				slog.Warn("sound library exhausted", slog.Int("picked", len(ss)), slog.Any("error", err))
 				break
 			}

@@ -9,7 +9,7 @@ import (
 	"github.com/disgoorg/omit"
 )
 
-// descryptions are requeired by Discord
+// descriptions are required by discord
 var cmds = []discord.ApplicationCommandCreate{
 	discord.SlashCommandCreate{
 		Name:        "play",

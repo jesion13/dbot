@@ -6,13 +6,12 @@ import (
 	"strings"
 )
 
-// New returns a slog.Logger using Handler, logging at level and above.
+// New returns a slog.Logger using Handler.
 func New(w io.Writer, level slog.Level) *slog.Logger {
 	return slog.New(NewHandler(w, level))
 }
 
-// ParseLevel maps a config string to a Level, defaulting to slog.LevelDebug
-// for anything unrecognized.
+// Anything unrecognized defaults to slog.LevelDebug.
 func ParseLevel(s string) slog.Level {
 	switch strings.ToLower(s) {
 	case "sql":

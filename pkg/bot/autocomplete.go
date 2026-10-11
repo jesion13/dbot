@@ -12,7 +12,6 @@ import (
 	"github.com/disgoorg/disgo/events"
 )
 
-// playlistAutocomplete suggests saved playlists for the focused `name` option.
 // The option value is the internal playlist id, never the title: titles collide.
 func (d *DBot) playlistAutocomplete(e *events.AutocompleteInteractionCreate) {
 	switch e.Data.CommandName {
@@ -27,8 +26,7 @@ func (d *DBot) playlistAutocomplete(e *events.AutocompleteInteractionCreate) {
 		option = e.Data.Focused()
 	)
 	if option.Type == discord.ApplicationCommandOptionTypeString {
-		// AutocompleteOption.String() panics on malformed values; autocomplete must
-		// never take the event loop down
+		// panics on malformed values; autocomplete must never take the event loop down
 		if err := json.Unmarshal(option.Value, &input); err != nil {
 			input = ""
 		}
@@ -37,15 +35,15 @@ func (d *DBot) playlistAutocomplete(e *events.AutocompleteInteractionCreate) {
 		guild = e.GuildID().String()
 	}
 
-	// filtering happens in SQL, before the limit, so a partial title can still match
-	// playlists beyond the first page
+	// filtering happens in SQL, before the limit, so a partial title still matches
+	// beyond the first page
 	playlists, err := d.Store.SearchPlaylists(d.Ctx, store.SearchPlaylistsParams{
 		GuildID: guild,
 		Title:   input,
 	})
 	if err != nil {
 		slog.Error("playlist autocomplete failed", slog.Any("error", err))
-		// answer with nothing rather than leaving the interaction hanging
+
 		if err := e.AutocompleteResult([]discord.AutocompleteChoice{}); err != nil {
 			slog.Error("autocomplete respond failed", slog.Any("error", err))
 		}
@@ -58,8 +56,6 @@ func (d *DBot) playlistAutocomplete(e *events.AutocompleteInteractionCreate) {
 	}
 }
 
-// playlistChoices renders suggestions. The value is the internal id, never the title:
-// duplicate titles are valid and the user must be able to tell them apart.
 func playlistChoices(playlists []store.Playlist) []discord.AutocompleteChoice {
 	titles := make(map[string]int, len(playlists))
 	for _, p := range playlists {

@@ -34,7 +34,7 @@ type videoSettings struct {
 	Scale       bool
 }
 
-// file is closed when context is canceled
+// the returned file is closed when the context is canceled
 func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.File, error) {
 	tmpDir, ok := ctx.Value(config.DirKey).(string)
 	if !ok || len(tmpDir) == 0 {
@@ -250,8 +250,7 @@ func formatDurationForFFmpeg(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", minutes, seconds)
 }
 
-// ParseTime reads a user-typed clip offset. It accepts "90", "90s", "2m30s",
-// "1:30" and "1:30:45".
+// Accepts "90", "90s", "2m30s", "1:30" and "1:30:45".
 func ParseTime(s string) (time.Duration, error) {
 	if strings.Contains(s, ":") {
 		parts := strings.Split(s, ":")
@@ -282,7 +281,7 @@ func ParseTime(s string) (time.Duration, error) {
 	return d, nil
 }
 
-// file is closed when context is canceled
+// the returned file is closed when the context is canceled
 func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error) {
 	tmpDir, ok := ctx.Value(config.DirKey).(string)
 	if !ok || len(tmpDir) == 0 {
@@ -365,7 +364,7 @@ func runCmd(cmd *exec.Cmd) error {
 	return nil
 }
 
-// file is closed when context is canceled
+// the returned file is closed when the context is canceled
 func ConvertToMP4(ctx context.Context, file string, clip Clip) (*os.File, error) {
 	tmpDir, ok := ctx.Value(config.DirKey).(string)
 	if !ok || len(tmpDir) == 0 {

@@ -6,37 +6,33 @@ import (
 )
 
 const (
-	// MaxSoundsPerSequence bounds one accepted sound request. It is also the cap
-	// the `event N` command clamps N to, so an accepted request always fits.
+	// also the cap `event N` clamps to, so an accepted request always fits
 	MaxSoundsPerSequence = 2137
-	// maxSoundRequests bounds how many accepted requests may wait behind the one
-	// playing.
+
+	// accepted requests allowed to wait behind the one playing
 	maxSoundRequests = 32
 )
 
-// SoundTrack is one sound file. URL is the source, Filepath the local file; an
-// empty Filepath means "download first".
+// One sound file; an empty Filepath means "download first".
 type SoundTrack struct {
 	Title    string
 	URL      string
 	Filepath string
 }
 
-// SoundSequence is an ordered run of sounds that must play without another
-// request interleaving between them. `event 13` is one sequence of 13, not 13
-// separate requests.
+// An ordered run that must play without another request interleaving: `event 13` is
+// one sequence of 13, not 13 separate requests.
 type SoundSequence struct {
 	Tracks []SoundTrack
 }
 
-// EnqueueSound appends a single sound as a one-item sequence.
 func (p *Player) EnqueueSound(s SoundTrack) error {
 	return p.EnqueueSoundSequence(SoundSequence{Tracks: []SoundTrack{s}})
 }
 
-// EnqueueSoundSequence appends one atomic request to the sound FIFO. The sequence
-// is copied, so the caller may reuse its slice. Music is suspended as soon as the
-// backlog becomes non-empty and stays suspended until it drains again.
+// Appends one atomic request to the sound FIFO; the sequence is copied, so the caller
+// may reuse its slice. Music is suspended as soon as the backlog becomes non-empty
+// and stays suspended until it drains.
 func (p *Player) EnqueueSoundSequence(seq SoundSequence) error {
 	if len(seq.Tracks) == 0 {
 		return ErrEmptySoundSequence
@@ -56,11 +52,9 @@ func (p *Player) EnqueueSoundSequence(seq SoundSequence) error {
 	}
 	if !p.soundActive {
 		p.soundActive = true
-		// suspend before the first sound starts, so back-to-back requests never
-		// let music slip through between them
+		// before the first sound, so back-to-back requests never let music slip through
 		p.gate.Broadcast()
-		// the output stays active across the handoff: music hands over to the sound
-		// without dropping the speaking flag
+		// no speaking-flag flicker across the handoff
 		p.refreshOutputLocked()
 	}
 	p.soundQ = append(p.soundQ, SoundSequence{Tracks: append([]SoundTrack(nil), seq.Tracks...)})
@@ -73,8 +67,6 @@ func (p *Player) EnqueueSoundSequence(seq SoundSequence) error {
 	return nil
 }
 
-// soundLoop is the only sound producer: one request at a time, one sequence at a
-// time, in FIFO order.
 func (p *Player) soundLoop() {
 	for {
 		select {
@@ -98,9 +90,8 @@ func (p *Player) soundLoop() {
 	}
 }
 
-// playSequence plays every sound of one request in order. A sound that fails is
-// logged and skipped so the rest of the sequence still runs, and so music is
-// always released afterwards.
+// A sound that fails is logged and skipped so the rest of the sequence still runs, and
+// so music is always released afterwards.
 func (p *Player) playSequence(seq SoundSequence) {
 	defer p.releaseSounds()
 
@@ -114,8 +105,6 @@ func (p *Player) playSequence(seq SoundSequence) {
 	}
 }
 
-// releaseSounds lifts the music suspension once the whole backlog is drained, and
-// keeps it in place while another request is still waiting.
 func (p *Player) releaseSounds() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -123,12 +112,11 @@ func (p *Player) releaseSounds() {
 		return
 	}
 	if len(p.soundQ) > 0 {
-		// the next sequence takes over directly, music stays suspended
+
 		return
 	}
 	p.soundActive = false
 	p.gate.Broadcast()
-	// music that is still eligible keeps the output (and the speaking flag) as it
-	// was, so resuming is seamless
+	// still-eligible music keeps the speaking flag, so resuming is seamless
 	p.refreshOutputLocked()
 }

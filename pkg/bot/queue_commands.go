@@ -13,16 +13,13 @@ import (
 	"github.com/disgoorg/disgo/discord"
 )
 
-// queue commands are a plain text testing interface for the player queue. They are
-// deliberately thin: everything they do goes through the same player API the slash
-// commands use, and the queue itself only ever lives in the player.
+// A plain text testing interface, deliberately thin: everything goes through the same
+// player API the slash commands use, and the queue only ever lives in the player.
 const queueCmdPrefix = "!"
 
-// maxQueueMsgLen is under discord's 2000 char limit so a title containing markdown
-// or an embed still fits.
+// under discord's 2000 char limit, so a title containing markdown still fits
 const maxQueueMsgLen = 1900
 
-// queuePlayer is the part of the player these commands drive.
 type queuePlayer interface {
 	SkipNext() error
 	Previous() error
@@ -35,8 +32,8 @@ type queueCommand struct {
 	pos    int
 }
 
-// parseQueueCommand recognizes the five text commands. ok is false for anything
-// else, so unrelated messages (including sound aliases) are left alone.
+// ok is false for anything else, so unrelated messages (including sound aliases) are
+// left alone.
 func parseQueueCommand(content string) (c queueCommand, ok bool, err error) {
 	fields := strings.Fields(strings.ToLower(strings.TrimSpace(content)))
 	if len(fields) == 0 || !strings.HasPrefix(fields[0], queueCmdPrefix) {
@@ -66,15 +63,21 @@ func parseQueueCommand(content string) (c queueCommand, ok bool, err error) {
 	return c, false, nil
 }
 
-// runQueueCommand executes a parsed command and returns the reply text. It never
-// touches queue state itself - it only asks the player to.
+// Never touches queue state itself - it only asks the player to.
 func runQueueCommand(c queueCommand, p queuePlayer) string {
 	switch c.action {
 	case "next":
+		// the reply names the track being left, so it has to be read before the move:
+		// afterwards the snapshot already points at the next one
+		was := p.QueueSnapshot().Current()
 		if err := p.SkipNext(); err != nil {
 			return queueErrText(err, "nothing to skip to")
 		}
-		return queueNowText(p.QueueSnapshot(), "skipped")
+		if was == nil {
+			// nothing was playing, so there is nothing that got skipped
+			return queueNowText(p.QueueSnapshot(), "started")
+		}
+		return fmt.Sprintf("skipped **%s**", displayTitle(was.Title))
 	case "prev":
 		if err := p.Previous(); err != nil {
 			return queueErrText(err, "nothing to go back to")
@@ -90,7 +93,6 @@ func runQueueCommand(c queueCommand, p queuePlayer) string {
 	}
 }
 
-// queueErrText turns a player error into something a user can act on.
 func queueErrText(err error, fallback string) string {
 	switch {
 	case errors.Is(err, player.ErrNoPreviousTrack):
@@ -116,13 +118,8 @@ func queueNowText(s player.QueueSnapshot, verb string) string {
 	return fmt.Sprintf("%s **%s**", verb, displayTitle(cur.Title))
 }
 
-// displayTitle makes a title safe to put on one numbered line.
-//
-// Track metadata can carry newlines, tabs and runs of spaces - an imported title
-// often spans several lines. Rendered raw, one entry spills over several lines and
-// the numbering, the state marker and the message splitting all stop lining up. So
-// every whitespace run collapses to a single space, and a title that is nothing but
-// whitespace gets a placeholder rather than an apparently empty row.
+// Imported metadata carries newlines, tabs and space runs; rendered raw, one entry
+// spills over several lines and the numbering and message splitting stop lining up.
 func displayTitle(title string) string {
 	one := strings.Join(strings.Fields(title), " ")
 	if one == "" {
@@ -131,21 +128,14 @@ func displayTitle(title string) string {
 	return one
 }
 
-// untitledTrack stands in for a track whose title is empty or whitespace only.
+// stands in for a title that is empty or whitespace only
 const untitledTrack = "(untitled)"
 
-// queueText renders the player's complete lineup with absolute 1-based positions.
-//
 // Every entry is shown, including tracks that already played: a position has to keep
 // meaning the same track, otherwise a number the user read minutes ago would point
-// somewhere else. The list is deliberately plain - just "N. Title" - because a
-// status column in front of the number read as stray formatting. The playing track
-// is marked by its title instead, so the numbers stay flush left and aligned.
-// queueText renders the player's complete lineup with absolute 1-based positions.
-//
-// Every entry is shown, including tracks that already played: a position has to keep
-// meaning the same track, otherwise a number the user read minutes ago would point
-// somewhere else. Nothing here exposes a filepath, a URL, or sound requests.
+// somewhere else. The playing track is marked by its title rather than by a column in
+// front of the number, which read as stray formatting and broke the flush-left
+// alignment. Nothing here exposes a filepath, a URL, or sound requests.
 func queueText(s player.QueueSnapshot) string {
 	if s.Closed {
 		return "the player is closed"
@@ -172,7 +162,7 @@ func queueText(s player.QueueSnapshot) string {
 	return b.String()
 }
 
-// than limit bytes, so the caller must advance by len(head), not by limit.
+// so the caller must advance by len(head), not by limit
 func cutAt(s string, limit int) (head, rest string) {
 	if len(s) <= limit {
 		return s, ""
@@ -184,9 +174,8 @@ func cutAt(s string, limit int) (head, rest string) {
 	return head, s[len(head):]
 }
 
-// splitMessages breaks text into chunks that fit discord's limit, preferring line
-// boundaries. Chunks concatenate back to the original text exactly: no character
-// is dropped, duplicated or split mid-rune.
+// Prefers line boundaries. Chunks concatenate back to the original exactly: no
+// character dropped, duplicated or split mid-rune.
 func splitMessages(text string, limit int) []string {
 	if text == "" {
 		return nil
@@ -206,10 +195,10 @@ func splitMessages(text string, limit int) []string {
 
 	for i, line := range strings.Split(text, "\n") {
 		if i > 0 {
-			// the separator belongs to the previous line
+
 			appendChunk("\n")
 		}
-		// a line longer than the limit is split on rune boundaries
+
 		for len(line) > limit {
 			head, rest := cutAt(line, limit)
 			appendChunk(head)
@@ -220,8 +209,8 @@ func splitMessages(text string, limit int) []string {
 	return out
 }
 
-// queueCommandListener handles the five text queue commands. It reports whether the
-// message was one of them, so the caller can leave sound matching alone.
+// Reports whether the message was one of them, so the caller can leave sound
+// matching alone.
 func (d *DBot) queueCommandListener(m discord.Message) bool {
 	text, ok := d.queueCommandReply(m)
 	if !ok {
@@ -237,8 +226,7 @@ func (d *DBot) queueCommandListener(m discord.Message) bool {
 	return true
 }
 
-// queueCommandReply resolves one message into the text to answer with. ok is false
-// when the message is not one of the five commands, so nothing is sent for it.
+// ok is false when the message is not one of the five commands.
 func (d *DBot) queueCommandReply(m discord.Message) (string, bool) {
 	if m.Author.Bot {
 		return "", false

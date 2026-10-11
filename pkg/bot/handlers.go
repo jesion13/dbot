@@ -20,36 +20,30 @@ import (
 	"github.com/disgoorg/snowflake/v2"
 )
 
-// ErrInteractionAnswered means the interaction was already acknowledged, so the
-// generic error path in listeners.go must not send a second initial response. It is
-// returned even when delivering the final message failed: the interaction is consumed
-// either way and a second initial response would be rejected by discord.
+// The interaction was already acknowledged, so the generic error path in listeners.go
+// must not send a second initial response. Returned even when delivering the final
+// message failed: the interaction is consumed either way.
 var ErrInteractionAnswered = errors.New("interaction already answered")
 
 const maxMessageLen = 2000
 
-// truncate shortens s to discord's limit without splitting a utf-8 rune.
 func truncate(s string) string {
 	if len(s) <= maxMessageLen {
 		return s
 	}
 	s = s[:maxMessageLen-1]
-	// back off to a rune boundary
+
 	for len(s) > 0 && !utf8.ValidString(s) {
 		s = s[:len(s)-1]
 	}
 	return s
 }
 
-// answerDeferred finalizes an acknowledged interaction: it first edits the deferred
-// "thinking" response and falls back to a follow-up message. It always returns
-// ErrInteractionAnswered, because the interaction is consumed either way and a second
-// initial response would be rejected by discord.
+// Edits the deferred "thinking" response first, falling back to a follow-up message.
 func (d *DBot) answerDeferred(e *events.ApplicationCommandInteractionCreate, content string, ephemeral bool) error {
 	followup := discord.MessageCreate{Content: content}
 	if ephemeral {
-		// a follow-up message is built fresh, so it needs the flag again - without it a
-		// private confirmation is posted publicly
+		// a fresh follow-up needs the flag again, or a private confirmation goes public
 		followup.Flags = discord.MessageFlagEphemeral
 	}
 	return deliverDeferred(content,
@@ -65,9 +59,8 @@ func (d *DBot) answerDeferred(e *events.ApplicationCommandInteractionCreate, con
 		})
 }
 
-// deliverDeferred writes the final message, trying the deferred response first and a
-// follow-up message second. It never sends another initial interaction response.
-// edit and followup are injected so every delivery path is testable without discord.
+// Never sends another initial interaction response. edit and followup are injected so
+// every delivery path is testable without discord.
 func deliverDeferred(content string, edit, followup func(string) error) error {
 	content = truncate(content)
 
@@ -78,14 +71,13 @@ func deliverDeferred(content string, edit, followup func(string) error) error {
 	slog.Error("failed editing deferred response", slog.Any("error", err))
 
 	if err := followup(content); err != nil {
-		// a follow-up can be rejected too (expired token); nothing left to try
+
 		slog.Error("failed sending deferred follow-up", slog.Any("error", err))
 	}
 	return ErrInteractionAnswered
 }
 
-// isPlaylistRequest reports whether a /play url addresses a whole playlist. Playlist
-// playback always does queue/cache/voice work, so those interactions are deferred.
+// Playlist playback always does queue/cache/voice work, so those are deferred.
 func isPlaylistRequest(url string) bool {
 	link, ok := parseYTLink(url)
 	return ok && link.Playlist
@@ -102,7 +94,6 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 		url = att.URL
 	}
 
-	// defer before any playlist lookup, yt-dlp call or voice connect
 	deferred := isPlaylistRequest(url)
 	if deferred {
 		if err := e.DeferCreateMessage(false); err != nil {
@@ -127,8 +118,7 @@ func (d *DBot) handlePlay(ctx context.Context, e *events.ApplicationCommandInter
 }
 
 func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
-	// every /playlist run does cache lookups, a voice connect and a queue walk, so it
-	// is always deferred, with or without update:true
+
 	if err := e.DeferCreateMessage(false); err != nil {
 		return err
 	}
@@ -160,7 +150,7 @@ func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandI
 	if update {
 		pl, err = d.syncPlaylist(ctx, pl)
 		if err != nil {
-			// no stale-snapshot fallback: the user asked for a sync that failed
+
 			return d.answerDeferred(e, err.Error(), false)
 		}
 	}
@@ -180,8 +170,8 @@ func (d *DBot) handlePlaylist(ctx context.Context, e *events.ApplicationCommandI
 	return answer(res, nil)
 }
 
-// playlistQueuedMsg reports queue and cache separately: "queued N" alone hides whether
-// the media is local, still downloading, or could not be cached at all.
+// "queued N" alone hides whether the media is local, still downloading, or could not
+// be cached at all.
 func playlistQueuedMsg(res queueResult) string {
 	msg := fmt.Sprintf("queued %d entries", res.queued)
 	if res.cached > 0 {
@@ -199,12 +189,9 @@ func playlistQueuedMsg(res queueResult) string {
 	return msg
 }
 
-// errNotAuthorized is shown when a guild-administrator command is invoked by someone
-// who is not one, or outside a guild.
 const errNotAuthorized = "you need to be a server administrator"
 
-// isGuildAdmin re-checks the permission at runtime. Command registration is only a
-// UI hint, so it can never be what authorizes the mutation.
+// Command registration is only a UI hint, so it can never authorize a mutation.
 func isGuildAdmin(e *events.ApplicationCommandInteractionCreate) bool {
 	if e.GuildID() == nil {
 		return false
@@ -217,7 +204,7 @@ func isGuildAdmin(e *events.ApplicationCommandInteractionCreate) bool {
 }
 
 func (d *DBot) handlePlaylistDelete(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
-	// defer first: the handler always looks the playlist up before answering
+
 	if err := e.DeferCreateMessage(true); err != nil {
 		return err
 	}
@@ -234,8 +221,7 @@ func (d *DBot) handlePlaylistDelete(ctx context.Context, e *events.ApplicationCo
 	title, err := d.deletePlaylist(ctx, id, e.GuildID().String())
 	if err != nil {
 		if errors.Is(err, ErrPlaylistNotFound) || errors.Is(err, sql.ErrNoRows) {
-			// covers "does not exist", "another guild" and "already deleted" without
-			// telling the caller which
+
 			return d.answerDeferred(e, "playlist not found", true)
 		}
 		return d.answerDeferred(e, "could not delete playlist", true)
@@ -367,7 +353,6 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 		return fmt.Errorf("failed downloading video: %w", err)
 	}
 
-	// if download succeded backup file
 	go d.saveVideoInDir(url, e.GuildID().String(), "tomp4")
 
 	f, err := os.Open(info.Filepath)
@@ -388,7 +373,6 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 	}
 	hasHEVCVideo := ffmpeg.HasHEVCVideo(videoInfo)
 
-	// Always convert GIFs and MP4s that exceed the upload limit, need edits, or use HEVC.
 	if format == "gif" || stat.Size() > ffmpeg.DiscordMaxFileSizeBytes || mute || clip.Start > 0 || clip.End > 0 || hasHEVCVideo {
 		if format == "gif" {
 			msg := "converting to GIF..."
@@ -461,7 +445,7 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 		username = member.EffectiveName()
 	}
 
-	// Determine filename based on format; Discord infers rendering from the extension
+	// discord infers rendering from the extension
 	fileName := "dupa.mp4"
 	if format == "gif" {
 		fileName = "dupa.webp"

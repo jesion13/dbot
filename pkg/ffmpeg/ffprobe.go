@@ -50,7 +50,7 @@ func (t *MaybeTimeDuration) UnmarshalJSON(b []byte) error {
 
 	v, err := time.ParseDuration(s)
 	if err != nil {
-		// assume seconds
+
 		v, err = time.ParseDuration(s + "s")
 		if err != nil {
 			return err
@@ -64,7 +64,7 @@ func (t *MaybeTimeDuration) UnmarshalJSON(b []byte) error {
 type (
 	Streams struct {
 		Streams []Stream `json:"streams"`
-		// getting format since video strams don't always have duration and bitrate for some reason
+		// video streams often carry neither duration nor bitrate
 		Format struct {
 			Filename string            `json:"filename"`
 			Duration MaybeTimeDuration `json:"duration"`

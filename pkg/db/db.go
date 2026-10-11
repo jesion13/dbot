@@ -47,7 +47,6 @@ func ConnectStore(ctx context.Context, filename string, schema string) (*Store, 
 		w.Close()
 	}()
 
-	// create tables
 	goose.SetBaseFS(migrations.DBmigrations)
 	goose.SetDialect("sqlite3")
 	err = goose.UpContext(ctx, w, "migrations")
@@ -72,15 +71,15 @@ func ConnectStore(ctx context.Context, filename string, schema string) (*Store, 
 	return &Store{Queries: store.New(d), conn: w}, nil
 }
 
-// Store is store.Queries plus the connection, so callers can run a transaction
-// without a global db handle.
+// store.Queries plus the connection, so callers can run a transaction without a
+// global db handle.
 type Store struct {
 	*store.Queries
 	conn *sql.DB
 }
 
-// WithTx runs fn inside a transaction. fn gets queries bound to the tx, so all of
-// its statements commit or roll back together. It must not do network work.
+// fn gets queries bound to the tx, so all of its statements commit or roll back
+// together. It must not do network work.
 func (s *Store) WithTx(ctx context.Context, fn func(*store.Queries) error) error {
 	tx, err := s.conn.BeginTx(ctx, nil)
 	if err != nil {
@@ -109,7 +108,6 @@ func ConnectBackup(ctx context.Context, filename, password string) (*backup.Quer
 		w.Close()
 	}()
 
-	// create tables
 	goose.SetBaseFS(migrations.BackupMigrations)
 	goose.SetDialect("sqlite3")
 	err = goose.UpContext(ctx, w, "backup")
@@ -165,7 +163,6 @@ func (s db) QueryRowContext(ctx context.Context, sql string, args ...any) *sql.R
 	return row
 }
 
-// relaceConsecutiveSpaces replaces consecutive spaces with a single space
 func relaceConsecutiveSpaces(s string) string {
 	for strings.Contains(s, "  ") {
 		s = strings.ReplaceAll(s, "  ", " ")

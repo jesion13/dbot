@@ -32,7 +32,7 @@ import (
 type DBot struct {
 	Ctx   context.Context
 	Store *store.Queries
-	// StoreDB is Store plus the connection, used for transactional snapshot writes.
+	// Store plus the connection, for transactional snapshot writes
 	StoreDB *db.Store
 	Backup  *backup.Queries
 
@@ -41,27 +41,23 @@ type DBot struct {
 	ytdlp.YTDLP
 	// PlaylistInfoFunc fetches playlist metadata; nil means use yt-dlp.
 	PlaylistInfoFunc func(link string) (ytdlp.PlaylistMeta, error)
-	// MusicPlayer is for plaing stuff from YT and others.
-	//
-	// playerMu guards the pointer only: it makes reads cheap and safe. It is never
-	// held across a Close, which can take a while.
+	// playerMu guards the pointer only, and is never held across a Close, which can
+	// take a while
+
 	playerMu    sync.RWMutex
 	MusicPlayer *player.Player
-	// voiceMu serializes whole voice transitions. Two disconnect events arriving at
-	// once would otherwise both shut down the same player, close its connection and
-	// install two replacements, orphaning one of them with its workers running.
+	// two disconnect events arriving at once would otherwise both shut down the same
+	// player, close its connection and install two replacements, orphaning one
+
 	voiceMu sync.Mutex
-	// playerErrs is the single reporting stream. It belongs to the bot and outlives
-	// every player instance: a replaced player's errors are forwarded into it, so a
-	// swap can never silence error reporting. Players never close it.
+	// belongs to the bot and outlives every player, so a swap can never silence
+	// reporting; players never close it
 	playerErrs chan player.Err
-	// playerForwarders counts live error forwarders, so a test can assert that
-	// retired players leave none behind.
+	// lets a test assert that retired players leave no forwarder behind
 	playerForwarders atomic.Int32
 }
 
-// botCtx is never nil: tests build a DBot by hand, and selecting on a nil context
-// panics.
+// Never nil: tests build a DBot by hand, and selecting on a nil context panics.
 func (d *DBot) botCtx() context.Context {
 	if d.Ctx == nil {
 		return context.Background()
@@ -69,24 +65,22 @@ func (d *DBot) botCtx() context.Context {
 	return d.Ctx
 }
 
-// Player returns the active player. Safe against a concurrent replacement.
+// Safe against a concurrent replacement.
 func (d *DBot) Player() *player.Player {
 	d.playerMu.RLock()
 	defer d.playerMu.RUnlock()
 	return d.MusicPlayer
 }
 
-// SetPlayer installs p and starts forwarding its errors. This is the low-level
-// pointer setter; it does not tear anything down. Use ReplacePlayer for a real
-// transition so the whole sequence is serialized.
+// Installs p and starts forwarding its errors. This is the low-level pointer setter
+// and tears nothing down; use ReplacePlayer for a real transition.
 func (d *DBot) SetPlayer(p *player.Player) {
 	d.playerMu.Lock()
 	d.MusicPlayer = p
 	d.playerMu.Unlock()
 
-	// One forwarder per player, and it exits when that player's ErrChan closes (the
-	// player closes it once its workers are gone) or when the bot shuts down, so
-	// replacements never accumulate goroutines.
+	// exits when that player's ErrChan closes (once its workers are gone) or the bot
+	// shuts down, so replacements never accumulate goroutines
 	d.playerForwarders.Add(1)
 	go func() {
 		defer d.playerForwarders.Add(-1)
@@ -106,9 +100,8 @@ func (d *DBot) SetPlayer(p *player.Player) {
 	}()
 }
 
-// forwardPlayerErr hands one error to the reporting stream. The stream is bounded:
-// a full one drops the error with a log rather than blocking a playback worker
-// forever, because a stuck worker is worse than a lost message.
+// The stream is bounded: a full one drops with a log rather than blocking a playback
+// worker forever, because a stuck worker is worse than a lost message.
 func (d *DBot) forwardPlayerErr(e player.Err) {
 	if d.playerErrs == nil {
 		return
@@ -120,24 +113,22 @@ func (d *DBot) forwardPlayerErr(e player.Err) {
 	}
 }
 
-// ReplacePlayer performs a whole voice transition under one lock: shut the current
-// player down, wait for it, close its connection only then, and install exactly one
-// replacement. Concurrent callers are serialized, so a second transition cannot
-// orphan the first one's replacement.
+// One whole transition under one lock: shut the current player down, wait for it,
+// close its connection only then, install exactly one replacement. Serialized, so a
+// second transition cannot orphan the first one's replacement.
 func (d *DBot) ReplacePlayer() (*player.Player, error) {
 	d.voiceMu.Lock()
 	defer d.voiceMu.Unlock()
 	return d.replacePlayerLocked()
 }
 
-// replacePlayerLocked is ReplacePlayer's body. The caller must hold voiceMu, which
-// is what serializes attachment and replacement as one transition.
+// ReplacePlayer's body. The caller must hold voiceMu.
 func (d *DBot) replacePlayerLocked() (*player.Player, error) {
 	old := d.Player()
 	conn, _ := old.Conn()
 
-	// Close joins the workers that write to the connection, so it must finish first.
-	// playerMu is not held here on purpose.
+	// Close joins the workers writing to the connection, so it must finish first.
+	// playerMu is deliberately not held here.
 	var closeErr error
 	if err := old.Close(); err != nil {
 		closeErr = fmt.Errorf("close player: %w", err)
@@ -152,12 +143,9 @@ func (d *DBot) replacePlayerLocked() (*player.Player, error) {
 	return next, closeErr
 }
 
-// AttachVoiceConnection gives an established connection to the active player.
-//
-// It shares voiceMu with ReplacePlayer, so a connection can never be attached to a
-// player that a replacement has already snapshotted - the two operations are one
-// serialized transition. If the player refuses it, the connection is closed here so
-// it is never left unowned.
+// Shares voiceMu with ReplacePlayer, so a connection can never be attached to a player
+// a replacement has already snapshotted. A refused connection is closed here rather
+// than left unowned.
 func (d *DBot) AttachVoiceConnection(conn voice.Conn, vcid snowflake.ID) error {
 	d.voiceMu.Lock()
 	defer d.voiceMu.Unlock()
@@ -169,10 +157,8 @@ func (d *DBot) AttachVoiceConnection(conn voice.Conn, vcid snowflake.ID) error {
 	return nil
 }
 
-// Reconnect tears the voice session down and installs a fresh player that already
-// owns conn. It is the supported way to change connection: the old player is shut
-// down and its connection closed before the new one is attached, so no worker ever
-// writes to a connection that is being taken away.
+// The supported way to change connection: the old player and its connection are shut
+// down first, so no worker ever writes to a connection that is being taken away.
 func (d *DBot) Reconnect(conn voice.Conn, vcid snowflake.ID) (*player.Player, error) {
 	d.voiceMu.Lock()
 	defer d.voiceMu.Unlock()
@@ -190,7 +176,7 @@ func (d *DBot) Reconnect(conn voice.Conn, vcid snowflake.ID) (*player.Player, er
 	return next, nil
 }
 
-// playlistInfo is the single place playlist metadata is fetched, so tests can stub it.
+// The single place playlist metadata is fetched, so tests can stub it.
 func (d *DBot) playlistInfo(link string) (ytdlp.PlaylistMeta, error) {
 	if d.PlaylistInfoFunc != nil {
 		return d.PlaylistInfoFunc(link)
@@ -306,10 +292,8 @@ func (d *DBot) reportPlayerErrors(ctx context.Context) {
 	})
 }
 
-// consumePlayerErrors drains the bot's error stream into handle. It returns on
-// context cancellation: the stream belongs to the bot and is never closed, so a
-// bare range would block forever. It is separate from the posting so a test can
-// drive the reporting loop without a store or a REST client.
+// Returns on context cancellation: the stream belongs to the bot and is never closed,
+// so a bare range would block forever.
 func (d *DBot) consumePlayerErrors(ctx context.Context, handle func(player.Err)) {
 	for {
 		select {

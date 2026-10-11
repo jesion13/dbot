@@ -27,9 +27,7 @@ func NewRunner(ctx context.Context, store *store.Queries) Runner {
 
 type Job func(meta string) error
 
-// ErrPermanent marks a failure that will not fix itself on retry (e.g. a youtube
-// video that no longer exists). Such jobs are parked under status "unavailable"
-// instead of consuming retries.
+// Parked under status "unavailable" instead of consuming retries.
 var ErrPermanent = errors.New("permanent job failure")
 
 func (r Runner) RegisterJob(key string, j Job) {
@@ -47,7 +45,6 @@ func (r Runner) getJob(key string) Job {
 	return must(r.jobs.Load(key)).(Job)
 }
 
-// jobResult maps a job outcome onto the queue row update.
 func jobResult(entry store.Queue, err error) store.UpdateQueueEntryParams {
 	updated := store.UpdateQueueEntryParams{
 		FailCount: entry.FailCount,
@@ -58,7 +55,7 @@ func jobResult(entry store.Queue, err error) store.UpdateQueueEntryParams {
 	case err == nil:
 	case errors.Is(err, ErrPermanent):
 		slog.Info("job failed permanently", slog.Any("error", err))
-		// parked, not retried: nothing about it will change
+
 		updated.Status = "unavailable"
 		updated.LastMsg = sql.NullString{String: err.Error(), Valid: true}
 	default:
@@ -110,8 +107,8 @@ func (r Runner) Loop() {
 	}
 }
 
-// JobResultForTest exposes jobResult so other packages can assert the retry policy
-// against the SQL filters in db/queries/queue.sql.
+// exposes jobResult so other packages can assert the retry policy against the SQL
+// filters in db/queries/queue.sql
 func JobResultForTest(entry store.Queue, err error) store.UpdateQueueEntryParams {
 	return jobResult(entry, err)
 }

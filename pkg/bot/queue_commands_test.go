@@ -260,13 +260,23 @@ func TestQueueTextWithMultilineTitlesSurvivesMessageSplitting(t *testing.T) {
 
 // The same position renders identically no matter how playback got there: there is
 // no per-entry state left that could drift or contradict the cursor.
-func TestQueueOutputDoesNotDependOnHistory(t *testing.T) {
-	direct := queueText(lineup(3, "A", "B", "C", "D"))
-	// the same lineup, reached the same way, after the cursor wandered
-	wandered := queueText(lineup(3, "A", "B", "C", "D"))
-	assert.Equal(t, direct, wandered)
-	assert.NotContains(t, direct, "skipped", "no per-entry status survives into the display")
-	assert.NotContains(t, direct, "played")
+// The display contract in one place: absolute numbers, the current title bold and
+// nothing else, and no per-entry status words - there is no per-entry state to show.
+func TestQueueDisplayContract(t *testing.T) {
+	got := queueText(lineup(3, "A", "B", "C", "D"))
+
+	assert.Equal(t, []int{1, 2, 3, 4}, displayPositions(got),
+		"every entry has a stable absolute number")
+	assert.Equal(t, "C", displayCurrentTitle(got), "only the current track is highlighted")
+	assert.Equal(t, 1, strings.Count(got, "**")/2, "exactly one entry is bold")
+
+	for _, word := range []string{"played", "skipped", "upcoming", "now playing"} {
+		assert.NotContains(t, strings.ToLower(got), word,
+			"no per-entry status is displayed")
+	}
+	for _, mark := range []string{"\u2713", "\u25b6", "\u21b7", "\u00b7", "\u2192"} {
+		assert.NotContains(t, got, mark, "no status marker column")
+	}
 }
 
 func TestQueueTextPausedAndEmpty(t *testing.T) {
@@ -356,6 +366,78 @@ type stubConn struct {
 func (s stubConn) GuildID() snowflake.ID { return s.gid }
 
 func (s stubConn) SetSpeaking(context.Context, voice.SpeakingFlags) error { return nil }
+
+// advancingPlayer is a stub whose cursor actually moves, so a reply can be checked
+// against the track it was supposed to name rather than a frozen snapshot.
+type advancingPlayer struct {
+	tracks []player.Track
+	cursor int
+}
+
+func (a *advancingPlayer) SkipNext() error {
+	a.cursor = (a.cursor + 1) % len(a.tracks)
+	return nil
+}
+
+func (a *advancingPlayer) Previous() error {
+	if a.cursor == 0 {
+		return player.ErrNoPreviousTrack
+	}
+	a.cursor--
+	return nil
+}
+
+func (a *advancingPlayer) JumpTo(pos int) error {
+	if pos < 1 || pos > len(a.tracks) {
+		return player.ErrInvalidPosition
+	}
+	a.cursor = pos - 1
+	return nil
+}
+
+func (a *advancingPlayer) QueueSnapshot() player.QueueSnapshot {
+	return player.QueueSnapshot{Tracks: a.tracks, CurrentIndex: a.cursor + 1}
+}
+
+func lineup3() *advancingPlayer {
+	return &advancingPlayer{
+		tracks: []player.Track{{Title: "first"}, {Title: "second"}, {Title: "third"}},
+	}
+}
+
+// The reply has to name the track that was skipped, not the one that started playing.
+func TestSkipRepliesWithTheTrackItLeft(t *testing.T) {
+	p := lineup3()
+
+	got := runQueueCommand(queueCommand{action: "next"}, p)
+
+	assert.Equal(t, "skipped **first**", got)
+	assert.Equal(t, 1, p.cursor, "playback really did move on")
+	assert.NotContains(t, got, "second", "the track we skipped to must not be the one named")
+}
+
+// Same for prev and jump, which must name where we ended up - not where we came from.
+func TestNavigationRepliesNameWherePlaybackWent(t *testing.T) {
+	t.Run("prev", func(t *testing.T) {
+		p := lineup3()
+		p.cursor = 2
+		assert.Equal(t, "back to **second**", runQueueCommand(queueCommand{action: "prev"}, p))
+	})
+
+	t.Run("jump", func(t *testing.T) {
+		p := lineup3()
+		assert.Equal(t, "jumped **third**", runQueueCommand(queueCommand{action: "jump", pos: 3}, p))
+	})
+}
+
+// Wrapping off the end is still a skip: the last track is the one left behind.
+func TestSkipWrappingNamesTheLastTrack(t *testing.T) {
+	p := lineup3()
+	p.cursor = 2
+
+	assert.Equal(t, "skipped **third**", runQueueCommand(queueCommand{action: "next"}, p))
+	assert.Equal(t, 0, p.cursor)
+}
 
 func TestQueueCommandReplyGuards(t *testing.T) {
 	botGID := snowflake.ID(1)
