@@ -48,21 +48,13 @@ func (s *stubPlayer) JumpTo(pos int) error {
 
 func (s *stubPlayer) QueueSnapshot() player.QueueSnapshot { return s.snap }
 
-// lineup builds a snapshot: the entry at playing (1-based) is the current one, every
-// earlier entry is played and every later one is still waiting.
+// lineup builds a snapshot whose absolute position `playing` (1-based) is the current
+// one, or an idle one when playing is 0.
 func lineup(playing int, entries ...string) player.QueueSnapshot {
-	var s player.QueueSnapshot
-	for i, title := range entries {
-		e := player.QueueEntry{Track: player.Track{Title: title}, State: player.StateUpcoming}
-		switch {
-		case playing > 0 && i+1 == playing:
-			e.State = player.StatePlaying
-		case playing > 0 && i+1 < playing:
-			e.State = player.StatePlayed
-		}
-		s.Entries = append(s.Entries, e)
+	s := player.QueueSnapshot{CurrentIndex: playing}
+	for _, title := range entries {
+		s.Tracks = append(s.Tracks, player.Track{Title: title})
 	}
-	s.CurrentIndex = playing
 	return s
 }
 
@@ -145,8 +137,8 @@ func TestQueueCommandsReportInvalidState(t *testing.T) {
 		cmd  queueCommand
 		want string
 	}{
-		{"nothing playing", &stubPlayer{skipErr: player.ErrNothingPlaying}, queueCommand{action: "next"}, "nothing is playing"},
-		{"no history", &stubPlayer{prevErr: player.ErrNoPreviousTrack}, queueCommand{action: "prev"}, "there is no earlier track in the queue"},
+		{"empty lineup", &stubPlayer{skipErr: player.ErrNoNextTrack}, queueCommand{action: "next"}, "the queue is empty"},
+		{"no earlier track", &stubPlayer{prevErr: player.ErrNoPreviousTrack}, queueCommand{action: "prev"}, "there is no earlier track in the queue"},
 		{"bad position", &stubPlayer{jumpErr: player.ErrInvalidPosition}, queueCommand{action: "jump", pos: 9}, "position out of range"},
 		{"closed", &stubPlayer{skipErr: player.ErrClosed}, queueCommand{action: "next"}, "the player is closed"},
 		{"skipped off the end", &stubPlayer{skipErr: errors.New("boom")}, queueCommand{action: "next"}, "nothing to skip to"},
@@ -226,7 +218,7 @@ func TestQueueTextCollapsesWhitespaceInTitles(t *testing.T) {
 	lines := strings.Split(queueText(snap), "\n")
 
 	require.Len(t, lines, 4, "one line per entry, however many lines the raw title had")
-	for i, entry := range snap.Entries {
+	for i, entry := range snap.Tracks {
 		assert.Contains(t, lines[i+1], displayTitle(entry.Title), "entry %d keeps its number", i+1)
 	}
 	assert.Contains(t, lines[1], "Hiszpańskie Dziewczyny Szanty - Bitwa + lyrics Czarnobrody Kapitan",
@@ -266,22 +258,15 @@ func TestQueueTextWithMultilineTitlesSurvivesMessageSplitting(t *testing.T) {
 	}
 }
 
-// The list itself is uniform: a track the cursor jumped over is not visually flagged,
-// because the marker column was exactly the thing that made the output look broken.
-// The state is still in the snapshot for anything that needs it.
-func TestQueueTextIsUniformRegardlessOfState(t *testing.T) {
-	states := []player.QueueState{
-		player.StateUpcoming, player.StatePlayed, player.StateSkipped,
-	}
-	var lines []string
-	for _, st := range states {
-		snap := lineup(1, "A", "B")
-		snap.Entries[0].State = st
-		lines = append(lines, strings.Split(queueText(snap), "\n")[1])
-	}
-	for _, l := range lines {
-		assert.Equal(t, "1. **A**", l)
-	}
+// The same position renders identically no matter how playback got there: there is
+// no per-entry state left that could drift or contradict the cursor.
+func TestQueueOutputDoesNotDependOnHistory(t *testing.T) {
+	direct := queueText(lineup(3, "A", "B", "C", "D"))
+	// the same lineup, reached the same way, after the cursor wandered
+	wandered := queueText(lineup(3, "A", "B", "C", "D"))
+	assert.Equal(t, direct, wandered)
+	assert.NotContains(t, direct, "skipped", "no per-entry status survives into the display")
+	assert.NotContains(t, direct, "played")
 }
 
 func TestQueueTextPausedAndEmpty(t *testing.T) {
@@ -298,9 +283,9 @@ func TestQueueTextPausedAndEmpty(t *testing.T) {
 
 func TestQueueTextHidesInternals(t *testing.T) {
 	snap := player.QueueSnapshot{
-		Entries: []player.QueueEntry{
-			{Track: player.Track{Title: "song", URL: "https://x", Filepath: "/tmp/secret.opus"}, State: player.StatePlaying},
-			{Track: player.Track{Title: "next", Filepath: "/tmp/secret2.opus"}},
+		Tracks: []player.Track{
+			{Title: "song", URL: "https://x", Filepath: "/tmp/secret.opus"},
+			{Title: "next", Filepath: "/tmp/secret2.opus"},
 		},
 		CurrentIndex: 1,
 		SoundWait:    3,
@@ -425,7 +410,7 @@ func TestQueueCommandReplyGuards(t *testing.T) {
 		// an empty player has nothing to skip, which proves it was reached
 		text, ok := newBot(&botVCID).queueCommandReply(guildMsg("!next", botGID))
 		assert.True(t, ok)
-		assert.Equal(t, "nothing is playing", text)
+		assert.Equal(t, "the queue is empty", text, "an empty lineup has nothing to wrap to")
 	})
 
 	t.Run("invalid jump is reported, not executed", func(t *testing.T) {
@@ -494,9 +479,9 @@ func TestQueueTextNumbersStayValidAfterPlayback(t *testing.T) {
 		2*time.Second, 5*time.Millisecond)
 
 	s := p.QueueSnapshot()
-	assert.Len(t, s.Entries, 3, "the lineup is intact")
+	assert.Len(t, s.Tracks, 3, "the lineup is intact")
 	display := queueText(s)
-	for i, e := range s.Entries {
+	for i, e := range s.Tracks {
 		assert.Equal(t, i+1, displayIndexOf(display, e.Title),
 			"entry %d keeps its absolute position", i+1)
 	}
@@ -558,7 +543,7 @@ func TestQueueWithoutVoiceConnectionStaysConsistent(t *testing.T) {
 
 	require.Eventually(t, func() bool { return p.Current() == nil }, 2*time.Second, 5*time.Millisecond)
 	s := p.QueueSnapshot()
-	assert.Len(t, s.Entries, 2, "the lineup survives an idle player")
+	assert.Len(t, s.Tracks, 2, "the lineup survives an idle player")
 	assert.Zero(t, s.CurrentIndex)
 }
 

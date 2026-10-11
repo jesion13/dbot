@@ -93,12 +93,10 @@ func runQueueCommand(c queueCommand, p queuePlayer) string {
 // queueErrText turns a player error into something a user can act on.
 func queueErrText(err error, fallback string) string {
 	switch {
-	case errors.Is(err, player.ErrNothingPlaying):
-		return "nothing is playing"
 	case errors.Is(err, player.ErrNoPreviousTrack):
 		return "there is no earlier track in the queue"
 	case errors.Is(err, player.ErrNoNextTrack):
-		return "there is no later track in the queue"
+		return "the queue is empty"
 	case errors.Is(err, player.ErrInvalidPosition):
 		return err.Error()
 	case errors.Is(err, player.ErrClosed):
@@ -152,7 +150,7 @@ func queueText(s player.QueueSnapshot) string {
 	if s.Closed {
 		return "the player is closed"
 	}
-	if len(s.Entries) == 0 {
+	if len(s.Tracks) == 0 {
 		return "nothing has been queued yet"
 	}
 
@@ -164,8 +162,8 @@ func queueText(s player.QueueSnapshot) string {
 	if s.Paused {
 		b.WriteString(" (paused)")
 	}
-	for i, e := range s.Entries {
-		title := displayTitle(e.Title)
+	for i, t := range s.Tracks {
+		title := displayTitle(t.Title)
 		if i+1 == s.CurrentIndex {
 			title = "**" + title + "**"
 		}

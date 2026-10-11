@@ -20,8 +20,6 @@ import (
 )
 
 const (
-	// historyMax bounds the playback history.
-	historyMax = 50
 	// errBuf keeps an undrained ErrChan from blocking playback.
 	errBuf = 16
 	// speakingTimeout bounds the gateway call that updates discord's speaking flag,
@@ -31,7 +29,6 @@ const (
 
 var (
 	ErrClosed          = errors.New("player is closed")
-	ErrNothingPlaying  = errors.New("nothing is playing")
 	ErrNoPreviousTrack = errors.New("no earlier track in the lineup")
 	ErrNoNextTrack     = errors.New("no later track in the lineup")
 	ErrInvalidPosition = errors.New("position out of range")
@@ -145,15 +142,15 @@ type Player struct {
 	// lineup is the complete ordered track list for this player's lifetime. Entries
 	// are only ever appended, so a 1-based position always means the same track for
 	// as long as the player lives - including tracks that already played.
-	lineup []*lineupEntry
+	lineup []*Track
 	// cursor is the 0-based index of the playing entry, or -1 when idle.
 	cursor int
-	// resumeIndex is where playback continues when the player is idle: 0 on a fresh
-	// player, and one past the last entry once the lineup has been played out. New
-	// tracks are appended there, so a player that finished its lineup resumes with
-	// the newly added tracks instead of replaying from position 1.
+	// resumeIndex is where playback continues on its own when the player is idle.
+	// It equals len(lineup) once the lineup has been played out, which is how the
+	// player tells "finished, so pick up whatever gets appended next" apart from
+	// "never started" - the only difference between resuming at the new entries and
+	// replaying the old ones.
 	resumeIndex int
-	history     []Track
 	paused      bool
 	soundActive bool
 	closed      bool
@@ -250,7 +247,6 @@ func (p *Player) Close() error {
 	p.closed = true
 	p.abortLocked()
 	p.lineup = nil
-	p.history = nil
 	p.cursor = -1
 	p.soundQ = nil
 	p.soundActive = false
@@ -325,7 +321,7 @@ func (p *Player) Current() *Track {
 	if p.cursor < 0 || p.cursor >= len(p.lineup) {
 		return nil
 	}
-	c := p.lineup[p.cursor].track
+	c := *p.lineup[p.cursor]
 	return &c
 }
 
@@ -354,7 +350,7 @@ func (p *Player) EnqueueMany(tracks []Track) error {
 	for _, t := range tracks {
 		p.nextID++
 		t.ID = p.nextID
-		p.lineup = append(p.lineup, &lineupEntry{track: t, state: StateUpcoming})
+		p.lineup = append(p.lineup, &t)
 	}
 	if p.cursor < 0 {
 		// resume where we left off: on a fresh player that is position 1, and on a
@@ -376,16 +372,13 @@ func (p *Player) SkipNext() error {
 	if p.closed {
 		return ErrClosed
 	}
-	if p.cursor < 0 {
-		return ErrNothingPlaying
-	}
-	if p.cursor+1 >= len(p.lineup) {
+	if len(p.lineup) == 0 {
 		return ErrNoNextTrack
 	}
-
-	p.pushHistoryLocked(p.lineup[p.cursor].track)
-	p.lineup[p.cursor].state = StateSkipped
-	p.cursor++
+	// An explicit next always moves somewhere: off the end of the lineup wraps back to
+	// position 1, and a player idle at the end just starts over. That is deliberately
+	// different from a track finishing on its own, which stops.
+	p.cursor = (p.cursor + 1) % len(p.lineup)
 	p.startLocked()
 	return nil
 }
@@ -412,7 +405,6 @@ func (p *Player) Previous() error {
 		return ErrNoPreviousTrack
 	}
 
-	p.pushHistoryLocked(p.lineup[p.cursor].track)
 	p.startLocked()
 	return nil
 }
@@ -433,10 +425,6 @@ func (p *Player) JumpTo(position int) error {
 		return nil // already there
 	}
 
-	if p.cursor >= 0 && p.cursor < len(p.lineup) && p.lineup[p.cursor].state == StatePlaying {
-		// we are leaving a track that did not finish
-		p.lineup[p.cursor].state = StateSkipped
-	}
 	p.cursor = position - 1
 	p.startLocked()
 	return nil
@@ -452,9 +440,7 @@ func (p *Player) startLocked() {
 		return
 	}
 
-	entry := p.lineup[p.cursor]
-	entry.state = StatePlaying
-
+	entry := *p.lineup[p.cursor]
 	p.abortLocked()
 	p.gen++
 	gen := p.gen
@@ -466,16 +452,13 @@ func (p *Player) startLocked() {
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()
-		p.runTrack(gen, ctx, entry.track)
+		p.runTrack(gen, ctx, entry)
 	}()
 }
 
 // advanceLocked moves past the finished entry, or goes idle at the end of the
 // lineup. The finished entry stays where it is.
 func (p *Player) advanceLocked() {
-	if p.cursor >= 0 && p.cursor < len(p.lineup) {
-		p.lineup[p.cursor].state = StatePlayed
-	}
 	if p.cursor+1 < len(p.lineup) {
 		p.cursor++
 		p.resumeIndex = p.cursor
@@ -515,7 +498,7 @@ func (p *Player) QueueSnapshot() QueueSnapshot {
 	defer p.mu.Unlock()
 
 	snap := QueueSnapshot{
-		Entries:   make([]QueueEntry, 0, len(p.lineup)),
+		Tracks:    make([]Track, 0, len(p.lineup)),
 		Paused:    p.paused,
 		SoundWait: len(p.soundQ),
 		Closed:    p.closed,
@@ -523,8 +506,8 @@ func (p *Player) QueueSnapshot() QueueSnapshot {
 	if p.cursor >= 0 && p.cursor < len(p.lineup) {
 		snap.CurrentIndex = p.cursor + 1
 	}
-	for _, e := range p.lineup {
-		snap.Entries = append(snap.Entries, QueueEntry{Track: e.track, State: e.state})
+	for _, t := range p.lineup {
+		snap.Tracks = append(snap.Tracks, *t)
 	}
 	return snap
 }
@@ -542,7 +525,6 @@ func (p *Player) runTrack(gen uint64, ctx context.Context, t Track) {
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errOutputLost) {
 		p.reportErr(p.playerErr("failed to play '%s'", t.Title, err))
 	}
-	p.pushHistoryLocked(t)
 	p.advanceLocked()
 }
 

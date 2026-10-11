@@ -172,17 +172,9 @@ func track(title string) Track { return Track{Title: title, URL: "https://x/" + 
 
 // lineupTitles is every entry in absolute order.
 func lineupTitles(s QueueSnapshot) []string {
-	out := make([]string, 0, len(s.Entries))
-	for _, e := range s.Entries {
-		out = append(out, e.Title)
-	}
-	return out
-}
-
-func lineupStates(s QueueSnapshot) []QueueState {
-	out := make([]QueueState, 0, len(s.Entries))
-	for _, e := range s.Entries {
-		out = append(out, e.State)
+	out := make([]string, 0, len(s.Tracks))
+	for _, t := range s.Tracks {
+		out = append(out, t.Title)
 	}
 	return out
 }
@@ -216,7 +208,6 @@ func TestLineupKeepsEveryTrackForThePlayersLifetime(t *testing.T) {
 	s = p.QueueSnapshot()
 	assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(s), "playback never removes entries")
 	assert.Equal(t, 3, s.CurrentIndex, "positions do not shift as playback advances")
-	assert.Equal(t, []QueueState{StatePlayed, StatePlayed, StatePlaying}, lineupStates(s))
 }
 
 func TestReachingTheEndKeepsTheLineup(t *testing.T) {
@@ -230,7 +221,6 @@ func TestReachingTheEndKeepsTheLineup(t *testing.T) {
 	await(t, "idle at the end", func() bool { return playing(p) == 0 })
 	s := p.QueueSnapshot()
 	assert.Equal(t, []string{"a", "b"}, lineupTitles(s), "an idle player still shows its lineup")
-	assert.Equal(t, []QueueState{StatePlayed, StatePlayed}, lineupStates(s))
 }
 
 func TestAppendingNeverRenumbers(t *testing.T) {
@@ -253,12 +243,12 @@ func TestDuplicateTracksAreSeparateEntries(t *testing.T) {
 	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("a"), track("a")}))
 
 	s := p.QueueSnapshot()
-	require.Len(t, s.Entries, 3)
+	require.Len(t, s.Tracks, 3)
 	assert.Equal(t, "a", s.Entry(1).Title)
 	assert.Equal(t, "a", s.Entry(2).Title)
 	assert.Equal(t, "a", s.Entry(3).Title)
-	assert.NotEqual(t, s.Entry(1).Track.ID, s.Entry(2).Track.ID, "each entry keeps its own identity")
-	assert.NotEqual(t, s.Entry(2).Track.ID, s.Entry(3).Track.ID)
+	assert.NotEqual(t, s.Entry(1).ID, s.Entry(2).ID, "each entry keeps its own identity")
+	assert.NotEqual(t, s.Entry(2).ID, s.Entry(3).ID)
 }
 
 func TestEnqueueAfterTheEndPlaysTheNewEntries(t *testing.T) {
@@ -281,7 +271,7 @@ func TestEnqueueAfterTheEndPlaysTheNewEntries(t *testing.T) {
 
 func TestLongSessionKeepsEveryLineupEntry(t *testing.T) {
 	p := newFake(t)
-	const total = historyMax + 20
+	const total = 70
 
 	tracks := make([]Track, 0, total)
 	for i := range total {
@@ -296,12 +286,14 @@ func TestLongSessionKeepsEveryLineupEntry(t *testing.T) {
 	await(t, "idle", func() bool { return playing(p) == 0 })
 
 	s := p.QueueSnapshot()
-	assert.Len(t, s.Entries, total, "the history limit must not truncate the visible lineup")
+	assert.Len(t, s.Tracks, total, "a long session keeps every entry")
 	assert.Equal(t, fmt.Sprint(0), s.Entry(1).Title, "the oldest entry is still addressable")
 }
 
 // --- navigation -------------------------------------------------------------
 
+// An explicit next always moves somewhere: it wraps around the lineup. That is
+// deliberately different from a track finishing on its own, which stops at the end.
 func TestSkipNext(t *testing.T) {
 	t.Run("moves to the next absolute position", func(t *testing.T) {
 		p := newFake(t)
@@ -311,26 +303,39 @@ func TestSkipNext(t *testing.T) {
 		require.NoError(t, p.SkipNext())
 		awaitPlaying(t, p, "b")
 		assert.Equal(t, 2, playing(p))
-		// the entry it left stays, marked as skipped rather than played
-		s := p.QueueSnapshot()
-		assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(s))
-		assert.Equal(t, []QueueState{StateSkipped, StatePlaying, StateUpcoming}, lineupStates(s))
+		assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(p.QueueSnapshot()))
 	})
 
-	t.Run("at the end it fails and keeps the lineup", func(t *testing.T) {
+	t.Run("off the end it wraps to position 1", func(t *testing.T) {
 		p := newFake(t)
 		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
 		awaitPlaying(t, p, "a")
 		require.NoError(t, p.SkipNext())
 		awaitPlaying(t, p, "b")
 
-		assert.ErrorIs(t, p.SkipNext(), ErrNoNextTrack)
-		assert.Equal(t, []string{"a", "b"}, lineupTitles(p.QueueSnapshot()))
+		require.NoError(t, p.SkipNext())
+		awaitPlaying(t, p, "a")
+		assert.Equal(t, 1, playing(p))
+		assert.Equal(t, []string{"a", "b"}, lineupTitles(p.QueueSnapshot()), "wrapping renumbers nothing")
 	})
 
-	t.Run("idle player", func(t *testing.T) {
+	t.Run("idle at the end starts position 1", func(t *testing.T) {
 		p := newFake(t)
-		assert.ErrorIs(t, p.SkipNext(), ErrNothingPlaying)
+		require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+		awaitPlaying(t, p, "a")
+		p.endTrack(1)
+		awaitPlaying(t, p, "b")
+		p.endTrack(2)
+		await(t, "idle at the end", func() bool { return playing(p) == 0 })
+
+		require.NoError(t, p.SkipNext())
+		awaitPlaying(t, p, "a")
+		assert.Equal(t, 1, playing(p))
+	})
+
+	t.Run("an empty lineup has nothing to wrap to", func(t *testing.T) {
+		p := newFake(t)
+		assert.ErrorIs(t, p.SkipNext(), ErrNoNextTrack)
 	})
 }
 
@@ -401,8 +406,6 @@ func TestJumpToAbsolutePositions(t *testing.T) {
 		s := p.QueueSnapshot()
 		assert.Equal(t, 1, s.CurrentIndex)
 		assert.Equal(t, []string{"a", "b", "c"}, lineupTitles(s), "the lineup is intact")
-		// b really played; c is the one the jump walked away from, so it is skipped
-		assert.Equal(t, []QueueState{StatePlaying, StatePlayed, StateSkipped}, lineupStates(s))
 	})
 
 	t.Run("forwards past the end of the unplayed suffix", func(t *testing.T) {
@@ -427,7 +430,7 @@ func TestJumpToAbsolutePositions(t *testing.T) {
 		require.NoError(t, p.JumpTo(1))
 		time.Sleep(20 * time.Millisecond)
 		assert.Equal(t, "a", p.currentTitle())
-		assert.Equal(t, []QueueState{StatePlaying, StateUpcoming}, lineupStates(p.QueueSnapshot()))
+		assert.Equal(t, 1, playing(p))
 	})
 
 	t.Run("out of range leaves everything intact", func(t *testing.T) {
@@ -464,13 +467,11 @@ func TestNaturalCompletionAdvancesExactlyOnce(t *testing.T) {
 
 	p.endTrack(1)
 	awaitPlaying(t, p, "b")
-	await(t, "b played", func() bool { return lineupStates(p.QueueSnapshot())[0] == StatePlayed })
 	p.endTrack(2)
 	awaitPlaying(t, p, "c")
 	p.endTrack(3)
 	await(t, "idle at the end", func() bool { return playing(p) == 0 })
 
-	assert.Equal(t, []QueueState{StatePlayed, StatePlayed, StatePlayed}, lineupStates(p.QueueSnapshot()))
 	assert.Equal(t, 3, p.QueueSnapshot().Len())
 }
 
@@ -493,11 +494,11 @@ func TestSnapshotIsACopy(t *testing.T) {
 	awaitPlaying(t, p, "a")
 
 	s := p.QueueSnapshot()
-	s.Entries[0].Title = "hacked"
-	s.Entries = append(s.Entries, QueueEntry{Track: track("injected")})
+	s.Tracks[0].Title = "hacked"
+	s.Tracks = append(s.Tracks, track("injected"))
 
 	fresh := p.QueueSnapshot()
-	require.Len(t, fresh.Entries, 2, "a snapshot cannot grow the live lineup")
+	require.Len(t, fresh.Tracks, 2, "a snapshot cannot grow the live lineup")
 	assert.Equal(t, "a", fresh.Entry(1).Title)
 }
 
@@ -519,29 +520,6 @@ func TestEntryOutOfRange(t *testing.T) {
 	assert.Nil(t, s.Entry(2))
 	assert.NotNil(t, s.Entry(1))
 	assert.Equal(t, 1, s.Len())
-}
-
-func TestHistoryIsBounded(t *testing.T) {
-	p := newFake(t)
-	const total = historyMax + 10
-
-	tracks := make([]Track, 0, total)
-	for i := range total {
-		tracks = append(tracks, track(fmt.Sprint(i)))
-	}
-	require.NoError(t, p.EnqueueMany(tracks))
-
-	for i := range total {
-		awaitPlaying(t, p, fmt.Sprint(i))
-		p.endTrack(uint64(i + 1))
-	}
-	await(t, "idle", func() bool { return playing(p) == 0 })
-
-	p.Player.mu.Lock()
-	history := len(p.history)
-	p.Player.mu.Unlock()
-	assert.Equal(t, historyMax, history, "history stays bounded")
-	assert.Equal(t, total, p.QueueSnapshot().Len(), "without evicting lineup entries")
 }
 
 // --- pause ------------------------------------------------------------------
@@ -841,9 +819,132 @@ func TestPlaybackWithoutVoiceConnectionStillAdvances(t *testing.T) {
 
 	await(t, "advanced past both", func() bool {
 		s := p.QueueSnapshot()
-		return len(s.Entries) == 2 && s.CurrentIndex == 0
+		return len(s.Tracks) == 2 && s.CurrentIndex == 0
 	})
 	assert.Equal(t, []string{"a", "b"}, lineupTitles(p.QueueSnapshot()))
 	assert.Nil(t, p.Current(), "the player is idle, not stuck")
 	assert.Equal(t, 2, len(p.ErrChan), "each failed track was reported once")
+}
+
+// --- navigation after a jump -----------------------------------------------
+
+func TestNavigationAfterJumpUsesAbsoluteNeighbours(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{
+		track("a"), track("b"), track("c"), track("d"), track("e"),
+	}))
+	awaitPlaying(t, p, "a")
+
+	require.NoError(t, p.JumpTo(5))
+	awaitPlaying(t, p, "e")
+
+	// previous from 5 is 4, then 3 - the lineup is the source of truth
+	require.NoError(t, p.Previous())
+	awaitPlaying(t, p, "d")
+	assert.Equal(t, 4, playing(p))
+
+	require.NoError(t, p.Previous())
+	awaitPlaying(t, p, "c")
+	assert.Equal(t, 3, playing(p))
+	assert.Equal(t, []string{"a", "b", "c", "d", "e"}, lineupTitles(p.QueueSnapshot()))
+}
+
+func TestNextFromTheLastPositionWrapsToOne(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{
+		track("a"), track("b"), track("c"), track("d"), track("e"),
+	}))
+	awaitPlaying(t, p, "a")
+
+	require.NoError(t, p.JumpTo(5))
+	awaitPlaying(t, p, "e")
+
+	// 5 is the last entry, so next wraps to position 1
+	require.NoError(t, p.SkipNext())
+	awaitPlaying(t, p, "a")
+	assert.Equal(t, 1, playing(p))
+	assert.Equal(t, 5, p.QueueSnapshot().Len(), "wrapping never removes an entry")
+}
+
+// Natural completion stops at the end; an explicit next starts the lineup over.
+func TestNaturalCompletionStopsButNextRestarts(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+	p.endTrack(1)
+	awaitPlaying(t, p, "b")
+	p.endTrack(2)
+
+	// the last track finished on its own: playback stops, the lineup stays
+	await(t, "idle at the end", func() bool { return playing(p) == 0 })
+	assert.Equal(t, []string{"a", "b"}, lineupTitles(p.QueueSnapshot()),
+		"the lineup is retained, not cleared or restarted")
+
+	// asking for next is an explicit restart
+	require.NoError(t, p.SkipNext())
+	awaitPlaying(t, p, "a")
+	assert.Equal(t, 1, playing(p))
+}
+
+func TestAppendingAfterCompletionStartsAtTheNewEntry(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b")}))
+	awaitPlaying(t, p, "a")
+	p.endTrack(1)
+	awaitPlaying(t, p, "b")
+	p.endTrack(2)
+	await(t, "idle at the end", func() bool { return playing(p) == 0 })
+
+	// appending resumes at the first new position, it does not replay the old list
+	require.NoError(t, p.EnqueueMany([]Track{track("x"), track("y")}))
+	awaitPlaying(t, p, "x")
+
+	assert.Equal(t, []string{"a", "b", "x", "y"}, lineupTitles(p.QueueSnapshot()))
+	assert.Equal(t, 3, playing(p))
+
+	// and once that new track ends, playback continues at the one after it
+	p.endTrack(3)
+	awaitPlaying(t, p, "y")
+	assert.Equal(t, 4, playing(p))
+}
+
+func TestFailedJumpChangesNothing(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{track("a"), track("b"), track("c")}))
+	awaitPlaying(t, p, "a")
+
+	require.NoError(t, p.JumpTo(2))
+	awaitPlaying(t, p, "b")
+	before := p.QueueSnapshot()
+
+	for _, bad := range []int{0, -3, 4, 500} {
+		require.ErrorIs(t, p.JumpTo(bad), ErrInvalidPosition)
+	}
+
+	assert.Equal(t, before, p.QueueSnapshot(), "a failed jump leaves cursor and lineup untouched")
+	assert.Equal(t, "b", p.currentTitle())
+}
+
+func TestNavigationNeverRenumbers(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.EnqueueMany([]Track{
+		track("a"), track("b"), track("c"), track("d"),
+	}))
+	awaitPlaying(t, p, "a")
+
+	// wander around the lineup in every direction
+	require.NoError(t, p.JumpTo(4))
+	awaitPlaying(t, p, "d")
+	require.NoError(t, p.Previous())
+	awaitPlaying(t, p, "c")
+	require.NoError(t, p.SkipNext())
+	awaitPlaying(t, p, "d")
+	require.NoError(t, p.SkipNext())
+	awaitPlaying(t, p, "a")
+
+	s := p.QueueSnapshot()
+	assert.Equal(t, []string{"a", "b", "c", "d"}, lineupTitles(s))
+	for i, tr := range s.Tracks {
+		assert.Equal(t, tr.Title, s.Entry(i+1).Title, "position %d still means the same track", i+1)
+	}
 }

@@ -10,39 +10,20 @@ type Track struct {
 	Filepath string
 }
 
-// QueueState is what happened to one lineup entry. It is tracked per entry rather
-// than inferred from the position, because a track before the cursor may have been
-// jumped over rather than played.
-type QueueState int
-
-const (
-	// StateUpcoming means it has not been reached yet.
-	StateUpcoming QueueState = iota
-	// StatePlaying is the entry the cursor is on.
-	StatePlaying
-	// StatePlayed means it ran to the end on its own.
-	StatePlayed
-	// StateSkipped means playback moved past it without finishing.
-	StateSkipped
-)
-
-// QueueEntry is one absolute position in the player's lineup.
-type QueueEntry struct {
-	Track
-	State QueueState
-}
-
 // QueueSnapshot is a point-in-time copy of the player's lineup.
 //
-// Entries is the complete lineup for this player's lifetime, in original order,
-// including everything already played. Position N of the lineup is 1-based index N
-// in this slice, and that mapping never changes for an entry: tracks are only ever
-// appended. This is what makes a reported position stable and worth showing to a
-// user, and what JumpTo indexes.
+// Tracks is the complete lineup for this player's lifetime, in original order,
+// including everything that already played. Position N of the lineup is 1-based
+// index N in this slice, and that mapping never changes for an entry: tracks are
+// only ever appended. That is what makes a position worth showing a user, and it is
+// what Next, Previous and JumpTo all index.
+//
+// There is deliberately no per-entry state. Playback position already says where we
+// are; a second copy of "did this one play" could only drift from the cursor.
 //
 // Everything here is a copy, so callers cannot reach into the live lineup.
 type QueueSnapshot struct {
-	Entries []QueueEntry
+	Tracks []Track
 	// CurrentIndex is the absolute 1-based position of the playing entry, or 0 when
 	// the player is idle.
 	CurrentIndex int
@@ -54,35 +35,18 @@ type QueueSnapshot struct {
 	Closed bool
 }
 
-// Entry returns the entry at a 1-based absolute position, nil when out of range.
-func (s QueueSnapshot) Entry(position int) *QueueEntry {
-	if position < 1 || position > len(s.Entries) {
+// Entry returns the track at a 1-based absolute position, nil when out of range.
+func (s QueueSnapshot) Entry(position int) *Track {
+	if position < 1 || position > len(s.Tracks) {
 		return nil
 	}
-	return &s.Entries[position-1]
+	return &s.Tracks[position-1]
 }
 
-// Current returns the playing entry, nil when idle.
-func (s QueueSnapshot) Current() *QueueEntry {
+// Current returns the playing track, nil when idle.
+func (s QueueSnapshot) Current() *Track {
 	return s.Entry(s.CurrentIndex)
 }
 
 // Len is the number of entries in the lineup.
-func (s QueueSnapshot) Len() int { return len(s.Entries) }
-
-// lineupEntry is the player's private view of one position.
-type lineupEntry struct {
-	track Track
-	state QueueState
-}
-
-// pushHistoryLocked records a track that finished, newest last, bounded so a long
-// session cannot grow it without limit. History is diagnostics only: it is never
-// used to decide positions, and dropping old entries from it never evicts anything
-// from the lineup.
-func (p *Player) pushHistoryLocked(t Track) {
-	p.history = append(p.history, t)
-	if len(p.history) > historyMax {
-		p.history = append(p.history[:0], p.history[len(p.history)-historyMax:]...)
-	}
-}
+func (s QueueSnapshot) Len() int { return len(s.Tracks) }
