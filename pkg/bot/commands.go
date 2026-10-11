@@ -9,6 +9,10 @@ import (
 	"github.com/disgoorg/omit"
 )
 
+// discord rejects a non-positive position in the client, so the handler only ever
+// sees 1 or more.
+var minJumpPosition = 1
+
 // descriptions are required by discord
 var cmds = []discord.ApplicationCommandCreate{
 	discord.SlashCommandCreate{
@@ -59,6 +63,22 @@ var cmds = []discord.ApplicationCommandCreate{
 	discord.SlashCommandCreate{
 		Name:        "player",
 		Description: "show the player panel in this channel",
+	},
+	discord.SlashCommandCreate{
+		Name:        "queue",
+		Description: "browse the whole queue",
+	},
+	discord.SlashCommandCreate{
+		Name:        "jump",
+		Description: "play a track by its position in the queue",
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionInt{
+				Name:        "position",
+				Description: "absolute position, as shown by the player panel",
+				Required:    true,
+				MinValue:    &minJumpPosition,
+			},
+		},
 	},
 	discord.SlashCommandCreate{
 		Name:        "pause-play",
@@ -169,6 +189,8 @@ func (d *DBot) CommandHandlers() map[string]cmdHandler {
 		"wypierdalaj":     d.handleWypierdalaj,
 		"set-bot-channel": d.handleMapChannel,
 		"player":          d.handlePlayer,
+		"jump":            d.handleJump,
+		"queue":           d.handleQueue,
 		"pause-play":      d.handlePause,
 		"sound":           d.handleSound,
 		"to-mp4":          d.handleToMP4,

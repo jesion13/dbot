@@ -260,6 +260,51 @@ func (d *DBot) handleMapChannel(ctx context.Context, e *events.ApplicationComman
 	})
 }
 
+// handleJump plays an absolute position in the lineup. The panel numbers the queue
+// absolutely, so the number the user read there is the number they type here.
+func (d *DBot) handleJump(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
+	gid := e.GuildID()
+	if gid == nil {
+		return e.CreateMessage(discord.MessageCreate{
+			Content: "jump only works in a server",
+			Flags:   discord.MessageFlagEphemeral,
+		})
+	}
+	// same rule as the panel buttons: only someone in the bot's own voice channel may
+	// change what everyone hears
+	if reason := d.voiceGuard(*gid, e.User().ID); reason != "" {
+		return e.CreateMessage(discord.MessageCreate{Content: reason, Flags: discord.MessageFlagEphemeral})
+	}
+
+	position := e.SlashCommandInteractionData().Int("position")
+
+	// atomic: the track is captured with the cursor move, so playback advancing on its
+	// own cannot make the reply name the wrong one
+	to, err := d.Player().JumpToTrack(position)
+	if err != nil {
+		return e.CreateMessage(discord.MessageCreate{
+			Content: queueErrText(err, "could not jump"),
+			Flags:   discord.MessageFlagEphemeral,
+		})
+	}
+
+	// answered before the panel refresh: refreshGuild does REST calls and discord gives
+	// a command three seconds
+	reply := e.CreateMessage(discord.MessageCreate{
+		Content: fmt.Sprintf("jumped to **%s**", displayTitle(to.Title)),
+		Flags:   discord.MessageFlagEphemeral,
+	})
+
+	// show it on the panel now rather than at the next tick
+	unlock := d.panels.lockUpdate(*gid)
+	defer unlock()
+	if err := d.refreshGuild(ctx, *gid); err != nil {
+		slog.Error("player panel refresh after jump failed", slog.Any("error", err))
+	}
+
+	return reply
+}
+
 func (d *DBot) handlePause(ctx context.Context, e *events.ApplicationCommandInteractionCreate) error {
 	err := d.Player().TogglePause()
 	if err != nil {

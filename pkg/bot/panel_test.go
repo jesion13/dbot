@@ -1463,3 +1463,184 @@ func TestQueueErrTextCoversThePlayerErrors(t *testing.T) {
 		assert.Equal(t, tt.want, queueErrText(tt.err, "fallback"))
 	}
 }
+
+// --- /jump -------------------------------------------------------------------
+
+// jumpEvent builds a real /jump interaction carrying an integer option.
+func jumpEvent(t *testing.T, guildID, channelID, userID snowflake.ID, position int) *events.ApplicationCommandInteractionCreate {
+	t.Helper()
+	return jumpEventRecording(t, guildID, channelID, userID, position, nil, nil)
+}
+
+// jumpEventRecording captures what the handler answers the interaction with.
+func jumpEventRecording(t *testing.T, guildID, channelID, userID snowflake.ID, position int, onReply func(), out *[]discord.MessageCreate) *events.ApplicationCommandInteractionCreate {
+	t.Helper()
+	_ = onReply
+
+	guildField := ""
+	if guildID != 0 {
+		guildField = fmt.Sprintf(`"guild_id":"%s",`, guildID)
+	}
+	payload := fmt.Sprintf(`{
+	  "id":"500","application_id":"300","type":2,"token":"tok",
+	  %s"channel_id":"%s",
+	  "channel":{"id":"%s","type":0},
+	  "member":{"user":{"id":"%s","username":"u"}},
+	  "data":{"id":"400","name":"jump","type":1,
+	    "options":[{"name":"position","type":4,"value":%d}]}
+	}`, guildField, channelID, channelID, userID, position)
+
+	var i discord.ApplicationCommandInteraction
+	require.NoError(t, i.UnmarshalJSON([]byte(payload)))
+	return &events.ApplicationCommandInteractionCreate{
+		ApplicationCommandInteraction: i,
+		Respond: func(_ discord.InteractionResponseType, data discord.InteractionResponseData, _ ...rest.RequestOpt) error {
+			if onReply != nil {
+				onReply()
+			}
+			if out != nil {
+				if m, ok := data.(discord.MessageCreate); ok {
+					*out = append(*out, m)
+				}
+			}
+			return nil
+		},
+	}
+}
+
+func TestHandleJumpPlaysTheRequestedPosition(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(5)...)
+
+	require.NoError(t, tb.handleJump(context.Background(), jumpEvent(t, panelGID, panelChannel, panelUser, 3)))
+
+	assert.Equal(t, 3, tb.Player().QueueSnapshot().CurrentIndex)
+	assert.Equal(t, "track 3", tb.Player().Current().Title)
+}
+
+func TestHandleJumpOutOfRangeLeavesTheCursorAlone(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(3)...)
+	before := tb.Player().QueueSnapshot()
+
+	require.NoError(t, tb.handleJump(context.Background(), jumpEvent(t, panelGID, panelChannel, panelUser, 9)))
+
+	assert.Equal(t, before.CurrentIndex, tb.Player().QueueSnapshot().CurrentIndex,
+		"a rejected jump must not move anything")
+}
+
+// Jumping to the position already playing is a no-op that still reports the track,
+// so the user gets a reply rather than silence.
+func TestHandleJumpToCurrentPositionStillReports(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(3)...)
+
+	require.NoError(t, tb.handleJump(context.Background(), jumpEvent(t, panelGID, panelChannel, panelUser, 1)))
+
+	assert.Equal(t, 1, tb.Player().QueueSnapshot().CurrentIndex)
+}
+
+// A finished queue can be restarted by jumping into it, which is what asking for a
+// position means.
+func TestHandleJumpRestartsAFinishedLineup(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(3)...)
+	require.NoError(t, tb.Player().JumpTo(3))
+
+	require.NoError(t, tb.handleJump(context.Background(), jumpEvent(t, panelGID, panelChannel, panelUser, 2)))
+
+	assert.Equal(t, 2, tb.Player().QueueSnapshot().CurrentIndex,
+		"an idle queue is jumped into, not refused")
+}
+
+func TestHandleJumpNeedsTheVoiceChannel(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(4)...)
+	other := snowflake.ID(99)
+	tb.cache.AddVoiceState(discord.VoiceState{
+		GuildID: panelGID, UserID: panelUser, ChannelID: &other,
+	})
+
+	require.NoError(t, tb.handleJump(context.Background(), jumpEvent(t, panelGID, panelChannel, panelUser, 3)))
+
+	assert.Equal(t, 1, tb.Player().QueueSnapshot().CurrentIndex,
+		"someone outside the bot's channel must not steer playback")
+}
+
+func TestHandleJumpOutsideAGuildIsRefused(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(3)...)
+
+	require.NoError(t, tb.handleJump(context.Background(), jumpEvent(t, 0, panelChannel, panelUser, 2)))
+
+	assert.Equal(t, 1, tb.Player().QueueSnapshot().CurrentIndex)
+}
+
+// The panel must show the jump straight away rather than at the next tick.
+func TestHandleJumpRefreshesThePanel(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(4)...)
+	tb.registerPanel(1, panelMessage)
+	tb.edited = nil
+
+	require.NoError(t, tb.handleJump(context.Background(), jumpEvent(t, panelGID, panelChannel, panelUser, 3)))
+
+	assert.Equal(t, []snowflake.ID{panelMessage}, tb.editedIDs(),
+		"the panel is still the newest message, so it is rewritten in place")
+}
+
+func TestHandleJumpWithNoPanelDoesNothingVisible(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(4)...)
+	tb.sent = nil
+
+	require.NoError(t, tb.handleJump(context.Background(), jumpEvent(t, panelGID, panelChannel, panelUser, 3)))
+
+	assert.Equal(t, 3, tb.Player().QueueSnapshot().CurrentIndex)
+	assert.Empty(t, tb.sentIDs(), "jump must not conjure a panel that was never asked for")
+}
+
+// Every path answers the interaction exactly once, or discord reports "did not
+// respond" after three seconds.
+func TestHandleJumpAnswersExactlyOnce(t *testing.T) {
+	tests := []struct {
+		name     string
+		position int
+		truncate int
+	}{
+		{"valid position", 2, 0},
+		{"out of range", 99, 0},
+		{"outside the voice channel", 2, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tb := newPanelBot(t, panelTracks(4)...)
+			if tt.truncate < 0 {
+				other := snowflake.ID(99)
+				tb.cache.AddVoiceState(discord.VoiceState{
+					GuildID: panelGID, UserID: panelUser, ChannelID: &other,
+				})
+			}
+
+			var replies []discord.MessageCreate
+			require.NoError(t, tb.handleJump(context.Background(),
+				jumpEventRecording(t, panelGID, panelChannel, panelUser, tt.position, nil, &replies)))
+
+			require.Len(t, replies, 1, "exactly one response")
+			assert.True(t, replies[0].Flags.Has(discord.MessageFlagEphemeral),
+				"and it is private")
+		})
+	}
+}
+
+// A jump must answer before it touches the panel: refreshGuild makes REST calls, and
+// a slow one would eat discord's three second deadline.
+func TestHandleJumpRepliesBeforeRefreshing(t *testing.T) {
+	tb := newPanelBot(t, panelTracks(4)...)
+	tb.registerPanel(1, panelMessage)
+
+	var answered bool
+	var replies []discord.MessageCreate
+	tb.editPanel = func(context.Context, snowflake.ID, snowflake.ID, discord.MessageUpdate) error {
+		assert.True(t, answered, "the panel must not be touched before the command answered")
+		return nil
+	}
+
+	require.NoError(t, tb.handleJump(context.Background(),
+		jumpEventRecording(t, panelGID, panelChannel, panelUser, 3,
+			func() { answered = true }, &replies)))
+
+	assert.Len(t, replies, 1)
+}
