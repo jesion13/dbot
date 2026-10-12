@@ -33,10 +33,19 @@ var ErrFailedToDownload = errors.New("yt-dlp: failed to download")
 
 const (
 	ytdlp          = "yt-dlp"
-	printAfterMove = "after_move:%(.{title,filepath,ext,original_url})j"
+	printAfterMove = "after_move:%(.{id,title,filepath,ext,original_url})j"
 )
 
 var playlistInfoCMD, videoDownloadCMD, videoDownloadSmallCMD, audioDownloadCMD []string
+
+// Filenames are the id, never the title. A title can be long enough that the name
+// exceeds the 255 byte limit every filesystem enforces, and it is not unique - two
+// different Discord uploads both called Tramwaj.mp4 produced the same name and
+// overwrote each other. The title travels in VideoMeta and is stored in the database.
+//
+// --trim-filenames is gone as a result: with no title in the name there is nothing to
+// trim, and leaving it set would silently truncate ids instead.
+const outputTemplate = "%(id)s.%(ext)s"
 
 func init() {
 	go func() {
@@ -49,8 +58,7 @@ func init() {
 			"--no-playlist",
 			"--audio-format",
 			"opus",
-			"--trim-filenames", "100",
-			"-o", "%(title).100s [%(id)s].%(ext)s",
+			"-o", outputTemplate,
 		}
 		videoDownloadCMD = []string{
 			"--no-simulate",
@@ -59,8 +67,7 @@ func init() {
 			"--no-playlist",
 			"-f",
 			"bestvideo+bestaudio/best",
-			"--trim-filenames", "100",
-			"-o", "%(title).100s [%(id)s].%(ext)s",
+			"-o", outputTemplate,
 		}
 		videoDownloadSmallCMD = []string{
 			"--no-simulate",
@@ -70,8 +77,7 @@ func init() {
 			"-f",
 			`bv*[filesize<8M]+ba[filesize<2M]/b[filesize<10M]/bv*[height<=720]+ba/b[height<=720]/b`,
 			"--format-sort", "res,fps~30,codec:av01",
-			"--trim-filenames", "100",
-			"-o", "%(title).100s [%(id)s].%(ext)s",
+			"-o", outputTemplate,
 		}
 
 		playlistInfoCMD = []string{
@@ -85,6 +91,10 @@ func init() {
 }
 
 type VideoMeta struct {
+	// ID is yt-dlp's per-extractor id. It is a real, globally unique id for YouTube,
+	// but for direct links the generic extractor derives it from the URL filename, so
+	// it can collide between different videos and is not stable for the same one.
+	ID          string `json:"id"`
 	Title       string `json:"title"`
 	Ext         string `json:"ext"`
 	Filepath    string `json:"filepath"`

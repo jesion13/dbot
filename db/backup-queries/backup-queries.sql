@@ -9,8 +9,8 @@ WHERE msg_id = :msg_id;
 
 
 -- name: InsertArtefact :exec
-INSERT INTO artefacts (origin_url,path, media_type, hash, created_at,gid,chid,msgid)
-VALUES (:origin_url,:path, :media_type, :hash, :created_at, :gid, :chid, :msgid);
+INSERT INTO artefacts (origin_url,path, media_type, hash, created_at,gid,chid,msgid,title)
+VALUES (:origin_url,:path, :media_type, :hash, :created_at, :gid, :chid, :msgid, :title);
 
 -- repairs an existing artefact instead of failing on the origin_url primary key
 -- name: RepairArtefact :exec
@@ -20,7 +20,8 @@ SET path = :path,
     hash = :hash,
     gid = :gid,
     chid = :chid,
-    msgid = :msgid
+    msgid = :msgid,
+    title = :title
 WHERE origin_url = :origin_url;
 
 -- The dupe scan runs on every posted image and compares against the whole archive, so
@@ -40,6 +41,14 @@ WHERE origin_url IN (sqlc.slice('origin_urls'));
 
 -- name: DeleteArtefact :exec
 DELETE FROM artefacts WHERE gid = :gid AND chid = :chid and msgid = :msgid;
+
+-- The backfill reads titles out of the filenames the old scheme produced, so it only
+-- has to look at the video directory.
+-- name: ListVideoArtefacts :many
+SELECT * FROM artefacts WHERE path LIKE '%/play_history/%';
+
+-- name: SetArtefactTitle :exec
+UPDATE artefacts SET title = :title WHERE origin_url = :origin_url;
 
 -- name: GetArtefact :one
 SELECT * FROM artefacts WHERE origin_url = :origin_url;

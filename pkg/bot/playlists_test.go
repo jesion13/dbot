@@ -516,19 +516,19 @@ func TestCachedVideoLookup(t *testing.T) {
 
 	t.Run("usable artefact reused", func(t *testing.T) {
 		tb.writeArtefactFile(t, canonicalVideoURL("a"), testGID+"/play_history/a.mp4")
-		path, found, err := tb.cachedVideo(ctx, "a", "")
+		art, found, err := tb.cachedVideo(ctx, "a", "")
 		require.NoError(t, err)
 		assert.True(t, found)
-		assert.Equal(t, testGID+"/play_history/a.mp4", path)
+		assert.Equal(t, testGID+"/play_history/a.mp4", art.Path)
 	})
 
 	t.Run("legacy url candidate reused", func(t *testing.T) {
 		// old artefacts were indexed under whatever url yt-dlp returned
 		tb.writeArtefactFile(t, "https://youtu.be/legacy1", testGID+"/play_history/legacy.mp4")
-		path, found, err := tb.cachedVideo(ctx, "legacy1", "https://youtu.be/legacy1")
+		art, found, err := tb.cachedVideo(ctx, "legacy1", "https://youtu.be/legacy1")
 		require.NoError(t, err)
 		assert.True(t, found)
-		assert.Equal(t, testGID+"/play_history/legacy.mp4", path)
+		assert.Equal(t, testGID+"/play_history/legacy.mp4", art.Path)
 	})
 
 	t.Run("missing file is a miss", func(t *testing.T) {
@@ -868,9 +868,13 @@ func TestPlanQueueSkipsKnownUnavailableVideos(t *testing.T) {
 	entries := tb.entries(t, pl.ID)
 
 	// 'a' is already known to be unavailable, 'b' is not
+	// built with the real helper, not a literal: the meta is matched as an exact string,
+	// so a hardcoded copy silently stops matching the moment the struct changes
+	meta, err := backupJobMeta(testGID, videoBackupDir, canonicalVideoURL("a"))
+	require.NoError(t, err)
 	ins, err := rawStore(t, tb).ExecContext(ctx,
 		`INSERT INTO queue (job_type, meta, status, fail_count) VALUES (?, ?, 'unavailable', 0)`,
-		BackupJob, `{"Name":"","Dirs":"play_history","GID":"`+testGID+`","CHID":"","MSGID":"","ContentType":"","OriginUrl":"`+canonicalVideoURL("a")+`","PrependTime":false,"File":null}`)
+		BackupJob, meta)
 	require.NoError(t, err)
 	require.NotZero(t, ins)
 	before := tb.queueLen(t)

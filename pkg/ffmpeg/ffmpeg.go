@@ -377,6 +377,9 @@ func ConvertToMP4(ctx context.Context, file string, clip Clip) (*os.File, error)
 	cmd := exec.CommandContext(ctx, "ffmpeg")
 	cmd.Args = append(cmd.Args,
 		"-hide_banner",
+		// without this ffmpeg prompts when the output already exists, and since the
+		// backup job runner is one serial loop a prompt stalls every other job
+		"-y",
 		"-init_hw_device", "qsv=hw",
 		"-filter_hw_device", "hw")
 	if clip.Start > 0 {

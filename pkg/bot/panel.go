@@ -262,6 +262,13 @@ func (d *DBot) refreshGuild(ctx context.Context, gid snowflake.ID) error {
 		return nil
 	}
 
+	// Nothing queued means nothing to say. Rewriting the panel to repeat "STOPPED" every
+	// ten seconds would burn an edit and a generation-visible message change for no
+	// information, so the panel is left exactly as it was.
+	if len(d.Player().QueueSnapshot().Tracks) == 0 {
+		return nil
+	}
+
 	if d.panelIsNewest(cur) {
 		return d.panels.update(gid, func(e panelEntry) error {
 			return d.editPanelMessage(ctx, e.channelID, e.messageID,

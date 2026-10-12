@@ -2,6 +2,7 @@ package dbot
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -9,9 +10,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"dbot/pkg/backup"
 	"dbot/pkg/config"
+	"dbot/pkg/player"
 	"dbot/pkg/store"
 )
 
@@ -24,6 +27,91 @@ const jobAttempts = 3
 // artefactFile resolves a stored artefact path to a real file on disk.
 func artefactFile(path string) string {
 	return filepath.Join(config.BACKUP_DIR, path)
+}
+
+// cachedTrack is the track queued for an artefact already on disk.
+func cachedTrack(url string, art backup.Artefact) player.Track {
+	// rows written before the title column fall back to the filename, which is the
+	// only place their title was ever kept
+	title := art.Title
+	if title == "" {
+		title = artefactTitle(url, art.Path)
+	}
+	return player.Track{
+		Title:    title,
+		URL:      url,
+		Filepath: artefactFile(art.Path),
+	}
+}
+
+// artefactName is the on-disk name for a cached video: the yt-dlp id plus a short hash
+// of the source url.
+//
+// The id alone is not unique. It is only a real, globally unique id for YouTube; for a
+// direct link the generic extractor derives it from the url filename, and two different
+// Discord uploads both called Tramwaj.mp4 came back as id "Tramwaj" and overwrote each
+// other's file. origin_url is the primary key of artefacts, so hashing it makes the name
+// collision-free without having to trust the id.
+func artefactName(originURL, id string) string {
+	sum := sha256.Sum256([]byte(originURL))
+	safe := sanitiseArtefactID(id)
+	if safe == "" {
+		safe = "video"
+	}
+	return fmt.Sprintf("%s_%x.mp4", safe, sum[:4])
+}
+
+// maxArtefactIDLen bounds the id part of the name; the hash is 8 bytes and ".mp4" is
+// 4, so this keeps a name far below the 255 byte limit every filesystem enforces.
+const maxArtefactIDLen = 64
+
+// sanitiseArtefactID reduces an id to characters that are safe in a filename. A
+// generic-extractor id comes from a url filename, so it can contain anything.
+func sanitiseArtefactID(id string) string {
+	var b strings.Builder
+	b.Grow(len(id))
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+		if b.Len() >= maxArtefactIDLen {
+			break
+		}
+	}
+	return strings.Trim(b.String(), "_")
+}
+
+// artefactTitle recovers the title that yt-dlp left in a cached artefact's filename.
+// The artefacts table has no title column, and playing a cached file never runs
+// yt-dlp, so without this every cached /play track queues as (untitled).
+//
+// ConvertToMP4 wraps yt-dlp's "%(title).100s [%(id)s].%(ext)s" output in "edit.<name>.mp4",
+// giving "<gid>/<dir>/edit.<title> [<video id>].mp4". The id suffix is matched against
+// the url rather than by shape, so a title containing brackets survives intact.
+//
+// Returns "" for anything else - sounds, attachments, and the rare row whose filename
+// was truncated before the id, which stays untitled rather than showing a wrong title.
+func artefactTitle(originURL, storedPath string) string {
+	link, ok := parseYTLink(originURL)
+	if !ok || link.VideoID == "" {
+		return ""
+	}
+
+	name, ok := strings.CutPrefix(filepath.Base(storedPath), "edit.")
+	if !ok {
+		return ""
+	}
+	name = strings.TrimSuffix(name, ".mp4")
+
+	title, ok := strings.CutSuffix(name, " ["+link.VideoID+"]")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(title)
 }
 
 // artefactCandidates is every url a video may already be stored under, best first.
@@ -40,23 +128,24 @@ func artefactCandidates(videoID, rawURL string) []string {
 	return candidates
 }
 
-// A genuine backup-db error is returned, never swallowed into a cache miss.
-func (d *DBot) cachedVideo(ctx context.Context, videoID, rawURL string) (path string, found bool, err error) {
+// A genuine backup-db error is returned, never swallowed into a cache miss. The whole
+// artefact is returned because the caller needs its title as well as its path.
+func (d *DBot) cachedVideo(ctx context.Context, videoID, rawURL string) (art backup.Artefact, found bool, err error) {
 	for _, c := range artefactCandidates(videoID, rawURL) {
 		art, err := d.Backup.GetArtefact(ctx, c)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
-			return "", false, fmt.Errorf("get artefact '%s': %w", c, err)
+			return backup.Artefact{}, false, fmt.Errorf("get artefact '%s': %w", c, err)
 		}
 		if _, err := os.Stat(artefactFile(art.Path)); err != nil {
 			slog.Warn("artefact file missing, scheduling repair", slog.String("url", c), slog.Any("error", err))
-			return "", false, nil
+			return backup.Artefact{}, false, nil
 		}
-		return art.Path, true, nil
+		return art, true, nil
 	}
-	return "", false, nil
+	return backup.Artefact{}, false, nil
 }
 
 // cachedVideoBatch is cachedVideo for a whole playlist: one query resolves every entry

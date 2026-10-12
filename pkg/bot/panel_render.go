@@ -34,7 +34,7 @@ const (
 	playerPanelEmojiPlay  = "▶"
 	playerPanelEmojiStop  = "⏹"
 	playerPanelEmojiNext  = "⏭"
-	playerPanelEmojiEvent = "🔊"
+	playerPanelEmojiEvent = "🇪"
 )
 
 func playerPanelButton(style discord.ButtonStyle, emoji, customID string) discord.ButtonComponent {
@@ -113,9 +113,9 @@ func buildPlayerPanelV2(generation uint64, s player.QueueSnapshot) discord.Messa
 	}
 
 	previous := playerPanelButton(discord.ButtonStyleSecondary, playerPanelEmojiPrev, playerPanelID(generation, playerPanelBtnPrev))
-	pause := playerPanelButton(discord.ButtonStylePrimary, pauseButtonEmoji(s), playerPanelID(generation, playerPanelBtnPause))
+	pause := playerPanelButton(discord.ButtonStyleDanger, pauseButtonEmoji(s), playerPanelID(generation, playerPanelBtnPause))
 	next := playerPanelButton(discord.ButtonStyleSecondary, playerPanelEmojiNext, playerPanelID(generation, playerPanelBtnNext))
-	event := playerPanelButton(discord.ButtonStyleSuccess, playerPanelEmojiEvent, playerPanelID(generation, playerPanelBtnEvent))
+	event := playerPanelButton(discord.ButtonStyleSecondary, playerPanelEmojiEvent, playerPanelID(generation, playerPanelBtnEvent))
 
 	if s.Closed {
 		previous = previous.AsDisabled()

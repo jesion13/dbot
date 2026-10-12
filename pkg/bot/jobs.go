@@ -59,12 +59,12 @@ func (d *DBot) backupVideoJob(meta string) error {
 
 	// re-check the cache: the caller's preflight lookup can be minutes old and another
 	// job for the same video may have finished since.
-	path, found, err := d.cachedVideo(ctx, "", bf.OriginUrl)
+	art, found, err := d.cachedVideo(ctx, "", bf.OriginUrl)
 	if err != nil {
 		return fmt.Errorf("backupFile: %w", err)
 	}
 	if found {
-		slog.Debug("backup skipped, already cached", slog.String("url", bf.OriginUrl), slog.String("path", path))
+		slog.Debug("backup skipped, already cached", slog.String("url", bf.OriginUrl), slog.String("path", art.Path))
 		return nil
 	}
 
@@ -84,9 +84,16 @@ func (d *DBot) backupVideoJob(meta string) error {
 		return fmt.Errorf("backupFile: %w", err)
 	}
 	defer f.File.Close()
+	// the converted temp file goes when the job ends; f.Name is that temp path and
+	// must not be confused with the stored name below
 	defer os.Remove(f.Name)
+
 	bf.File = f.File
-	bf.Name = f.Name
+	// the stored name is the yt-dlp id plus a hash of the source, never the title: a
+	// long title can exceed the filesystem's filename limit, and two different videos
+	// can share a title (and, for direct links, an id)
+	bf.Name = artefactName(bf.OriginUrl, f.ID)
+	bf.Title = f.Title
 	bf.ContentType = "video/mp4"
 
 	slog.Debug("backupJob", slog.Any("bf", bf))

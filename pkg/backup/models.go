@@ -17,6 +17,7 @@ type Artefact struct {
 	Gid       string
 	Chid      string
 	Msgid     string
+	Title     string
 }
 
 type MsgBackup struct {

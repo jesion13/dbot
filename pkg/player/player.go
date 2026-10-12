@@ -740,12 +740,13 @@ func (p *Player) fetch(link string) (Track, error) {
 // 128k measured fine offline but sounded broken in discord; 64k is what shipped.
 // Change one knob at a time.
 const opusBitrate = "64k"
+const loudnorm = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
 func opusArgs() []string {
 	return []string{
 		"-ar", "48000",
-		"-ac", "2",
-		// "-af", dynaudnorm,
+		"-ac", "1",
+		"-af", loudnorm,
 		"-c:a", "libopus",
 		"-frame_duration", "20",
 		"-vbr", "off",

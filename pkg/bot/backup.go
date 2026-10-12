@@ -169,6 +169,7 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 		Gid:       params.GID,
 		Chid:      params.CHID,
 		Msgid:     params.MSGID,
+		Title:     params.Title,
 	}
 	err = d.Backup.InsertArtefact(ctx, artParams)
 	if err == nil {
@@ -189,6 +190,7 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 		Gid:       artParams.Gid,
 		Chid:      artParams.Chid,
 		Msgid:     artParams.Msgid,
+		Title:     artParams.Title,
 	})
 	if err != nil {
 		return info, fmt.Errorf("repair artefact '%s': %w", params.OriginUrl, err)
@@ -259,16 +261,25 @@ type BackupFile struct {
 	PossibleDupe *backup.Artefact
 }
 
+// This struct is also the job's persisted payload, marshalled to JSON and matched
+// against the queue table as an exact string. Every field that reaches the JSON must
+// therefore keep its historic shape: CHID and MSGID carry omitempty so a backup job's
+// meta stays byte-identical to the rows already in the queue, and Title is excluded
+// outright because it is only known once the download has run.
 type BackupFileParams struct {
 	Name        string
 	Dirs        string
 	GID         string
-	CHID        string
-	MSGID       string
+	CHID        string `json:",omitempty"`
+	MSGID       string `json:",omitempty"`
 	ContentType string
 	OriginUrl   string
 	PrependTime bool
 	File        io.Reader
+
+	// Title is the real, untruncated title yt-dlp reported. It is never part of the
+	// job meta and never part of a filename.
+	Title string `json:"-"`
 }
 
 func (d *DBot) backupFile(params BackupFileParams) (BackupFile, error) {
@@ -307,4 +318,37 @@ func (d *DBot) backupFile(params BackupFileParams) (BackupFile, error) {
 	backupFile.Size = n
 
 	return backupFile, nil
+}
+
+// BackfillArtefactTitles fills in the title column for rows written before it existed,
+// by reading the title back out of the filename the old scheme produced.
+//
+// It only touches the video directory and only rows whose title is still empty, so it is
+// safe to run repeatedly and never rewrites a title that was stored properly. Rows it
+// cannot recover - a non-YouTube source, or a filename truncated before the id - are
+// left empty and stay untitled, exactly as they are today.
+func BackfillArtefactTitles(ctx context.Context, q *backup.Queries) (filled, skipped int, err error) {
+	rows, err := q.ListVideoArtefacts(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("list artefacts: %w", err)
+	}
+
+	for _, a := range rows {
+		if a.Title != "" {
+			continue
+		}
+		title := artefactTitle(a.OriginUrl, a.Path)
+		if title == "" {
+			skipped++
+			continue
+		}
+		if err := q.SetArtefactTitle(ctx, backup.SetArtefactTitleParams{
+			OriginUrl: a.OriginUrl,
+			Title:     title,
+		}); err != nil {
+			return filled, skipped, fmt.Errorf("set title for '%s': %w", a.OriginUrl, err)
+		}
+		filled++
+	}
+	return filled, skipped, nil
 }

@@ -27,7 +27,7 @@ func (q *Queries) DeleteArtefact(ctx context.Context, arg DeleteArtefactParams) 
 }
 
 const getArtefact = `-- name: GetArtefact :one
-SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid FROM artefacts WHERE origin_url = ?1
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title FROM artefacts WHERE origin_url = ?1
 `
 
 func (q *Queries) GetArtefact(ctx context.Context, originUrl string) (Artefact, error) {
@@ -42,12 +42,13 @@ func (q *Queries) GetArtefact(ctx context.Context, originUrl string) (Artefact, 
 		&i.Gid,
 		&i.Chid,
 		&i.Msgid,
+		&i.Title,
 	)
 	return i, err
 }
 
 const getArtefacts = `-- name: GetArtefacts :many
-SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid FROM artefacts
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title FROM artefacts
 WHERE
     media_type in ('image/jpg','image/jpeg','image/png','image/webp')
 AND
@@ -81,6 +82,7 @@ func (q *Queries) GetArtefacts(ctx context.Context, arg GetArtefactsParams) ([]A
 			&i.Gid,
 			&i.Chid,
 			&i.Msgid,
+			&i.Title,
 		); err != nil {
 			return nil, err
 		}
@@ -96,7 +98,7 @@ func (q *Queries) GetArtefacts(ctx context.Context, arg GetArtefactsParams) ([]A
 }
 
 const getArtefactsByURLs = `-- name: GetArtefactsByURLs :many
-SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid FROM artefacts
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title FROM artefacts
 WHERE origin_url IN (/*SLICE:origin_urls*/?)
 `
 
@@ -128,6 +130,7 @@ func (q *Queries) GetArtefactsByURLs(ctx context.Context, originUrls []string) (
 			&i.Gid,
 			&i.Chid,
 			&i.Msgid,
+			&i.Title,
 		); err != nil {
 			return nil, err
 		}
@@ -143,8 +146,8 @@ func (q *Queries) GetArtefactsByURLs(ctx context.Context, originUrls []string) (
 }
 
 const insertArtefact = `-- name: InsertArtefact :exec
-INSERT INTO artefacts (origin_url,path, media_type, hash, created_at,gid,chid,msgid)
-VALUES (?1,?2, ?3, ?4, ?5, ?6, ?7, ?8)
+INSERT INTO artefacts (origin_url,path, media_type, hash, created_at,gid,chid,msgid,title)
+VALUES (?1,?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
 `
 
 type InsertArtefactParams struct {
@@ -156,6 +159,7 @@ type InsertArtefactParams struct {
 	Gid       string
 	Chid      string
 	Msgid     string
+	Title     string
 }
 
 func (q *Queries) InsertArtefact(ctx context.Context, arg InsertArtefactParams) error {
@@ -168,6 +172,7 @@ func (q *Queries) InsertArtefact(ctx context.Context, arg InsertArtefactParams) 
 		arg.Gid,
 		arg.Chid,
 		arg.Msgid,
+		arg.Title,
 	)
 	return err
 }
@@ -198,6 +203,45 @@ func (q *Queries) InsertBackup(ctx context.Context, arg InsertBackupParams) erro
 	return err
 }
 
+const listVideoArtefacts = `-- name: ListVideoArtefacts :many
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title FROM artefacts WHERE path LIKE '%/play_history/%'
+`
+
+// The backfill reads titles out of the filenames the old scheme produced, so it only
+// has to look at the video directory.
+func (q *Queries) ListVideoArtefacts(ctx context.Context) ([]Artefact, error) {
+	rows, err := q.db.QueryContext(ctx, listVideoArtefacts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Artefact
+	for rows.Next() {
+		var i Artefact
+		if err := rows.Scan(
+			&i.OriginUrl,
+			&i.Path,
+			&i.MediaType,
+			&i.Hash,
+			&i.CreatedAt,
+			&i.Gid,
+			&i.Chid,
+			&i.Msgid,
+			&i.Title,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const repairArtefact = `-- name: RepairArtefact :exec
 UPDATE artefacts
 SET path = ?1,
@@ -205,8 +249,9 @@ SET path = ?1,
     hash = ?3,
     gid = ?4,
     chid = ?5,
-    msgid = ?6
-WHERE origin_url = ?7
+    msgid = ?6,
+    title = ?7
+WHERE origin_url = ?8
 `
 
 type RepairArtefactParams struct {
@@ -216,6 +261,7 @@ type RepairArtefactParams struct {
 	Gid       string
 	Chid      string
 	Msgid     string
+	Title     string
 	OriginUrl string
 }
 
@@ -228,8 +274,23 @@ func (q *Queries) RepairArtefact(ctx context.Context, arg RepairArtefactParams) 
 		arg.Gid,
 		arg.Chid,
 		arg.Msgid,
+		arg.Title,
 		arg.OriginUrl,
 	)
+	return err
+}
+
+const setArtefactTitle = `-- name: SetArtefactTitle :exec
+UPDATE artefacts SET title = ?1 WHERE origin_url = ?2
+`
+
+type SetArtefactTitleParams struct {
+	Title     string
+	OriginUrl string
+}
+
+func (q *Queries) SetArtefactTitle(ctx context.Context, arg SetArtefactTitleParams) error {
+	_, err := q.db.ExecContext(ctx, setArtefactTitle, arg.Title, arg.OriginUrl)
 	return err
 }
 

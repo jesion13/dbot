@@ -412,6 +412,11 @@ type MP4File struct {
 	Filepath string
 	Name     string
 	File     *os.File
+	// Title and ID are what yt-dlp reported, before any filename trimming could have
+	// touched them. Both are needed after the download: the id to name the stored file
+	// and the title to record in the database.
+	Title string
+	ID    string
 }
 
 func (d *DBot) downloadAsMP4(ctx context.Context, url string) (MP4File, error) {
@@ -429,6 +434,8 @@ func (d *DBot) downloadAsMP4(ctx context.Context, url string) (MP4File, error) {
 		Filepath: f.Name(),
 		Name:     f.Name(),
 		File:     f,
+		Title:    vi.Title,
+		ID:       vi.ID,
 	}, nil
 }
 
@@ -495,13 +502,13 @@ func (d *DBot) play(ctx context.Context, gID, uID string, url string) error {
 		if ok {
 			url = canonicalVideoURL(link.VideoID)
 		}
-		path, found, err := d.cachedVideo(ctx, "", url)
+		art, found, err := d.cachedVideo(ctx, "", url)
 		if err != nil {
 			slog.Error("artefact lookup failed", slog.Any("error", err), slog.String("url", url))
 		} else if found {
-			slog.Debug("play: artefact already exists", slog.String("path", path))
+			slog.Debug("play: artefact already exists", slog.String("path", art.Path))
 			// url stays the source, filepath the local copy - the player never guesses
-			return d.Player().Enqueue(player.Track{URL: url, Filepath: artefactFile(path)})
+			return d.Player().Enqueue(cachedTrack(url, art))
 		} else {
 			slog.Debug("play: not cached, queueing source and scheduling backup", slog.String("url", url))
 			go d.saveVideoInDir(url, gID, videoBackupDir)

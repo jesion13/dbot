@@ -956,12 +956,23 @@ func TestEnsurePanelFailedPublishRegistersNothing(t *testing.T) {
 	tb := newTestBot(t)
 	tb.GuildID = panelGID
 	mappedMusicChannel(t, tb)
-	require.NoError(t, tb.MusicPlayer.EnqueueMany([]player.Track{{Title: "song"}}))
 	pb := newPanelRecorder(t, tb)
 	pb.sendErr = errors.New("rate limited")
 
+	// A track with no media fails to play and is gone within a few milliseconds, so
+	// ensureOnce's "is anything playing" guard can return before the failing send is
+	// ever reached. Queue a fresh one per attempt and stop as soon as the send is
+	// actually exercised, rather than relying on the window being short.
+	var err error
+	for range 50 {
+		require.NoError(t, tb.MusicPlayer.EnqueueMany([]player.Track{{Title: "song"}}))
+		if err = tb.ensureOnce(context.Background()); err != nil {
+			break
+		}
+	}
+
 	// the failure is reported, but nothing is registered or deleted
-	require.Error(t, tb.ensureOnce(context.Background()))
+	require.Error(t, err, "the failing publish must be reported")
 
 	_, ok := tb.panels.active(panelGID)
 	assert.False(t, ok, "nothing may be registered when the send failed")
