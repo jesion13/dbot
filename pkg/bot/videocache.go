@@ -118,6 +118,14 @@ func artefactTitle(originURL, storedPath string) string {
 	return strings.TrimSpace(title)
 }
 
+// videoIDForURL is the youtube id behind a url, or "" when it is not a youtube one.
+func videoIDForURL(rawURL string) string {
+	if link, ok := parseYTLink(rawURL); ok {
+		return link.VideoID
+	}
+	return ""
+}
+
 // artefactCandidates is every url a video may already be stored under, best first.
 // Legacy artefacts were indexed under whatever url yt-dlp handed us, so the raw url is
 // a fallback rather than a duplicate.

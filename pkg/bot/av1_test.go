@@ -295,3 +295,83 @@ func TestGuildAndDir(t *testing.T) {
 	assert.Empty(t, gid)
 	assert.Empty(t, dir)
 }
+
+// --- one video, many url forms ------------------------------------------------
+
+func TestVideoIDForURL(t *testing.T) {
+	tests := map[string]string{
+		"https://www.youtube.com/watch?v=9ebgudgt3rA":        "9ebgudgt3rA",
+		"https://youtu.be/9ebgudgt3rA":                       "9ebgudgt3rA",
+		"https://music.youtube.com/watch?v=9ebgudgt3rA":      "9ebgudgt3rA",
+		"https://www.youtube.com/watch?v=9ebgudgt3rA&si=abc": "9ebgudgt3rA",
+		"https://m.youtube.com/watch?v=9ebgudgt3rA":          "9ebgudgt3rA",
+		"https://cdn.discordapp.com/x/dupa.mp4":              "",
+		"https://i1.jbzd.com.pl/contents/2025/12/abc.mp4":    "",
+		"": "",
+	}
+	for url, want := range tests {
+		assert.Equal(t, want, videoIDForURL(url), "url %q", url)
+	}
+}
+
+// A video already cached under one url form must be found when a different form of
+// the same video comes in. Without the video id in the lookup, youtu.be/X and
+// watch?v=X each download and store their own copy.
+func TestCacheLookupIsIdAware(t *testing.T) {
+	tb := newTestBot(t)
+
+	// stored under the canonical form, as play() has always done
+	stored := canonicalVideoURL("9ebgudgt3rA")
+	putArtefact(t, tb, stored, "9ebgudgt3rA_6a809802.webm", true)
+
+	for _, other := range []string{
+		"https://youtu.be/9ebgudgt3rA",
+		"https://music.youtube.com/watch?v=9ebgudgt3rA",
+		"https://www.youtube.com/watch?v=9ebgudgt3rA&si=tracking",
+	} {
+		art, found, err := tb.cachedVideo(tb.Ctx, videoIDForURL(other), other)
+		require.NoError(t, err)
+		assert.True(t, found, "%s must find the cached copy", other)
+		assert.Equal(t, "9ebgudgt3rA_6a809802.webm", filepath.Base(art.Path),
+			"%s must reuse it rather than download again", other)
+	}
+}
+
+// A non-youtube source has no id, so it still falls back to the raw url.
+func TestCacheLookupFallsBackForNonYouTube(t *testing.T) {
+	tb := newTestBot(t)
+	raw := "https://i1.jbzd.com.pl/contents/2025/12/abc.mp4"
+	putArtefact(t, tb, raw, "abc_11223344.webm", true)
+
+	art, found, err := tb.cachedVideo(tb.Ctx, videoIDForURL(raw), raw)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "abc_11223344.webm", filepath.Base(art.Path))
+}
+
+// The job must take the id-aware path, or a requeued legacy url downloads a second copy.
+func TestBackupJobSkipsWhenTheVideoExistsUnderAnotherURL(t *testing.T) {
+	tb := newTestBot(t)
+	config.TMP_PATH = t.TempDir()
+
+	// cached under the canonical url, as a normal play would have stored it
+	putArtefact(t, tb, canonicalVideoURL("9ebgudgt3rA"), "9ebgudgt3rA_6a809802.webm", true)
+
+	// but the queue row carries the legacy url form
+	legacy := "https://youtu.be/9ebgudgt3rA"
+	calls := 0
+	tb.DownloadVideoFunc = func(context.Context, string) (ytdlp.VideoMeta, error) {
+		calls++
+		return ytdlp.VideoMeta{ID: "9ebgudgt3rA", Title: "Bomba!", Ext: "webm"}, nil
+	}
+
+	meta, err := backupJobMeta(testGID, videoBackupDir, legacy)
+	require.NoError(t, err)
+	require.NoError(t, tb.backupVideoJob(meta))
+
+	assert.Zero(t, calls, "an already-cached video must not be downloaded again")
+
+	art, err := tb.Backup.GetArtefact(tb.Ctx, canonicalVideoURL("9ebgudgt3rA"))
+	require.NoError(t, err)
+	assert.Equal(t, "9ebgudgt3rA_6a809802.webm", filepath.Base(art.Path), "and not re-stored")
+}

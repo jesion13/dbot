@@ -59,7 +59,10 @@ func (d *DBot) backupVideoJob(meta string) error {
 
 	// re-check the cache: the caller's preflight lookup can be minutes old and another
 	// job for the same video may have finished since.
-	art, found, err := d.cachedVideo(ctx, "", bf.OriginUrl)
+	// The video id matters here: rows written years ago are indexed under whatever url
+	// form they arrived in (youtu.be, music.youtube.com), so looking up only the raw url
+	// misses the copy already on disk and downloads the same video a second time.
+	art, found, err := d.cachedVideo(ctx, videoIDForURL(bf.OriginUrl), bf.OriginUrl)
 	if err != nil {
 		return fmt.Errorf("backupFile: %w", err)
 	}
