@@ -36,7 +36,7 @@ const (
 	printAfterMove = "after_move:%(.{id,title,vcodec,filepath,ext,original_url})j"
 )
 
-var playlistInfoCMD, videoDownloadCMD, videoDownloadSmallCMD, audioDownloadCMD []string
+var playlistInfoCMD, videoDownloadCMD, videoDownloadSmallCMD, audioDownloadCMD, titleCMD []string
 
 // Filenames are the id, never the title. A title can be long enough that the name
 // exceeds the 255 byte limit every filesystem enforces, and it is not unique - two
@@ -83,6 +83,15 @@ func init() {
 			`bv*[filesize<8M]+ba[filesize<2M]/b[filesize<10M]/bv*[height<=720]+ba/b[height<=720]/b`,
 			"--format-sort", "res,fps~30,codec:av01",
 			"-o", outputTemplate,
+		}
+
+		// metadata only: one title per line, nothing downloaded
+		titleCMD = []string{
+			"--skip-download",
+			"--no-playlist",
+			"--no-colors",
+			"--print", "%(title)s",
+			"--cookies", filepath.Join(must(os.Getwd()), "prod-data", config.COOKIE_PATH),
 		}
 
 		playlistInfoCMD = []string{
@@ -207,6 +216,34 @@ func (YTDLP) DownloadVideoSmall(ctx context.Context, link string) (VideoMeta, er
 	}
 
 	return meta, nil
+}
+
+// Title asks yt-dlp for a video's title without downloading it. Nothing else knows the
+// title of a video that is not in the artefact cache, so this is how an uncached /play
+// stops queueing as (untitled).
+func (YTDLP) Title(ctx context.Context, link string) (string, error) {
+	link, err := parseSpecialLinks(link)
+	if err != nil {
+		return "", errors.Join(errors.New("Special Links Parser"), err)
+	}
+
+	cmd := exec.CommandContext(ctx, ytdlp, append(titleCMD, "--", link)...)
+	cmd.Dir = config.TMP_PATH
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	slog.Debug("Title", slog.String("cmd", cmd.String()), slog.String("link", link))
+	if err := cmd.Run(); err != nil {
+		b, _ := io.ReadAll(stderr)
+		return "", errors.Join(ErrFailedToDownload, errors.New(string(b)))
+	}
+
+	// --no-playlist keeps it to one line, but a newline can still sneak into a title
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	return strings.TrimSpace(lines[len(lines)-1]), nil
 }
 
 type PlaylistMeta struct {

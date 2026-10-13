@@ -281,6 +281,31 @@ func (p *Player) Current() *Track {
 	return &c
 }
 
+// FillTitle names the queued entries for a url whose title was not known when they were
+// queued, and reports how many it named. Streaming a track never asks yt-dlp for
+// metadata, so an uncached /play queues untitled and only a later probe can name it.
+// Entries that already have a title are left alone, so a probe can never overwrite a
+// real one with a wrong one.
+func (p *Player) FillTitle(url, title string) int {
+	if title == "" {
+		return 0
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return 0
+	}
+	filled := 0
+	for _, t := range p.lineup {
+		if t.Title == "" && t.URL == url {
+			t.Title = title
+			filled++
+		}
+	}
+	return filled
+}
+
 // EnqueueMany without the atomic batch. Does not clear a manual pause.
 func (p *Player) Enqueue(t Track) error {
 	return p.EnqueueMany([]Track{t})

@@ -44,6 +44,8 @@ type DBot struct {
 	// DownloadVideoFunc fetches a video; nil means use yt-dlp. Exists for the same
 	// reason as PlaylistInfoFunc: the real one shells out and cannot run in a test.
 	DownloadVideoFunc func(ctx context.Context, link string) (ytdlp.VideoMeta, error)
+	// TitleFunc resolves a title only; nil means use yt-dlp.
+	TitleFunc func(ctx context.Context, link string) (string, error)
 	// playerMu guards the pointer only, and is never held across a Close, which can
 	// take a while
 
@@ -211,6 +213,14 @@ func (d *DBot) downloadVideo(ctx context.Context, link string) (ytdlp.VideoMeta,
 		return d.DownloadVideoFunc(ctx, link)
 	}
 	return d.DownloadVideo(ctx, link)
+}
+
+// The single place a title is resolved from yt-dlp, so tests can stub it.
+func (d *DBot) videoTitle(ctx context.Context, link string) (string, error) {
+	if d.TitleFunc != nil {
+		return d.TitleFunc(ctx, link)
+	}
+	return d.Title(ctx, link)
 }
 
 func dbotErr(msg string, vars ...any) error {
@@ -559,9 +569,34 @@ func (d *DBot) play(ctx context.Context, gID, uID string, url string) error {
 			go d.saveVideoInDir(url, gID, videoBackupDir)
 		}
 
-		return d.Player().Enqueue(player.Track{URL: url})
+		return d.enqueueSource(url)
 	}
 
+	return nil
+}
+
+// enqueueSource queues a url there is no local copy of, then names it once yt-dlp
+// answers. A track with a Filepath already has its title, and streaming one never asks
+// yt-dlp for metadata, so without this probe an uncached /play stays (untitled) forever.
+//
+// The probe runs in the background on the bot's context, never the caller's: an
+// interaction's ctx is cancelled the moment its handler returns, so /play answers
+// immediately and a yt-dlp that hangs or gets rate-limited costs the title only.
+func (d *DBot) enqueueSource(url string) error {
+	if err := d.Player().Enqueue(player.Track{URL: url}); err != nil {
+		return err
+	}
+
+	go func() {
+		title, err := d.videoTitle(d.botCtx(), url)
+		if err != nil {
+			slog.Debug("could not resolve a title", slog.String("url", url), slog.Any("error", err))
+			return
+		}
+		if n := d.Player().FillTitle(url, title); n > 0 {
+			slog.Debug("named a queued track", slog.String("url", url), slog.Int("tracks", n))
+		}
+	}()
 	return nil
 }
 
@@ -599,5 +634,6 @@ func (d *DBot) playPlaylistURL(ctx context.Context, gID, playlistID string) erro
 
 func (d *DBot) searchAndPlay(url string) error {
 	url = fmt.Sprintf(`ytsearch:"%s"`, url)
-	return d.Player().Enqueue(player.Track{URL: url})
+	// yt-dlp resolves the query to one video, so its title is the one that plays
+	return d.enqueueSource(url)
 }

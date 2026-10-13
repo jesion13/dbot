@@ -1,7 +1,10 @@
 package dbot
 
 import (
+	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -92,6 +95,72 @@ func TestPlayCachedArtefactQueuesTheRecoveredTitle(t *testing.T) {
 	assert.Equal(t, url, tracks[0].URL, "the url stays the source")
 	assert.Equal(t, artefactFile(testGID+"/play_history/edit.Hiszpańskie Dziewczyny [0Rdg6GUv-wQ].mp4"),
 		tracks[0].Filepath, "and it still plays from disk")
+}
+
+// The uncached /play path: nothing on disk knows the title, so yt-dlp is asked for it
+// after the track is queued, and the panel gets a name instead of (untitled).
+func TestPlayUncachedVideoResolvesItsTitle(t *testing.T) {
+	tb := newTestBot(t)
+	require.NoError(t, tb.MusicPlayer.SetVC(stubConn{gid: panelGID}, panelBotVC))
+
+	asked := make(chan string, 1)
+	tb.TitleFunc = func(_ context.Context, link string) (string, error) {
+		asked <- link
+		return "Hiszpańskie Dziewczyny", nil
+	}
+
+	url := canonicalVideoURL("0Rdg6GUv-wQ")
+	require.NoError(t, tb.play(tb.Ctx, testGID, panelUser.String(), url))
+
+	// queued untitled first: /play must not wait on yt-dlp
+	require.Equal(t, "", tb.Player().QueueSnapshot().Entry(1).Title)
+
+	select {
+	case link := <-asked:
+		assert.Equal(t, url, link)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the title probe")
+	}
+	awaitTitle(t, tb, "Hiszpańskie Dziewczyny")
+
+	tracks := tb.Player().QueueSnapshot().Tracks
+	require.Len(t, tracks, 1)
+	assert.Empty(t, tracks[0].Filepath, "an uncached track still streams from its url")
+}
+
+// A probe that fails costs the title, never the track.
+func TestPlayUncachedVideoWithFailedProbeStillQueues(t *testing.T) {
+	tb := newTestBot(t)
+	require.NoError(t, tb.MusicPlayer.SetVC(stubConn{gid: panelGID}, panelBotVC))
+
+	failed := make(chan struct{})
+	tb.TitleFunc = func(context.Context, string) (string, error) {
+		close(failed)
+		return "", errors.New("youtube is rate limiting us")
+	}
+
+	require.NoError(t, tb.play(tb.Ctx, testGID, panelUser.String(), canonicalVideoURL("0Rdg6GUv-wQ")))
+	select {
+	case <-failed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the title probe")
+	}
+
+	tracks := tb.Player().QueueSnapshot().Tracks
+	require.Len(t, tracks, 1)
+	assert.Empty(t, tracks[0].Title, "a failed probe leaves it untitled, never wrongly named")
+}
+
+func awaitTitle(t *testing.T, tb *testBot, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if tr := tb.Player().QueueSnapshot().Entry(1); tr != nil && tr.Title == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("track 1 never got the title %q", want)
 }
 
 // An artefact we cannot read a title from still plays, just untitled - never wrongly.

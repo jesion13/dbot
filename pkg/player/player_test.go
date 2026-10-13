@@ -739,6 +739,47 @@ func TestCloseIsIdempotent(t *testing.T) {
 	require.ErrorIs(t, p.EnqueueSoundSequence(SoundSequence{Tracks: []SoundTrack{{Title: "x"}}}), ErrClosed)
 }
 
+// --- late titles ------------------------------------------------------------
+
+// A queued entry whose title was unknown gets it later, keyed by url. The same url twice
+// in one lineup is one video, so both are named.
+func TestFillTitleNamesUntitledEntriesForThatUrl(t *testing.T) {
+	p := newFake(t)
+	const url = "https://x/stream"
+	require.NoError(t, p.EnqueueMany([]Track{{URL: url}, {Title: "kept", URL: "https://x/other"}, {URL: url}}))
+
+	assert.Equal(t, 2, p.FillTitle(url, "Some Song"))
+	assert.Equal(t, []string{"Some Song", "kept", "Some Song"}, lineupTitles(p.QueueSnapshot()))
+}
+
+// A title already there is never overwritten: a probe that answers late, or for a
+// different video, must not rename a real one.
+func TestFillTitleNeverOverwritesAKnownTitle(t *testing.T) {
+	p := newFake(t)
+	const url = "https://x/stream"
+	require.NoError(t, p.Enqueue(Track{Title: "The Real One", URL: url}))
+
+	assert.Zero(t, p.FillTitle(url, "Some Other Song"))
+	assert.Equal(t, "The Real One", p.currentTitle())
+}
+
+func TestFillTitleOnAnUnqueuedUrlAndEmptyTitleChangesNothing(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.Enqueue(track("a")))
+
+	assert.Zero(t, p.FillTitle("https://x/not-queued", "Nope"))
+	assert.Zero(t, p.FillTitle("https://x/a", ""), "an empty title must not wipe a row")
+	assert.Equal(t, []string{"a"}, lineupTitles(p.QueueSnapshot()))
+}
+
+func TestFillTitleAfterCloseIsSafe(t *testing.T) {
+	p := newFake(t)
+	require.NoError(t, p.Enqueue(track("a")))
+	require.NoError(t, p.Close())
+
+	assert.Zero(t, p.FillTitle("https://x/a", "Late"))
+}
+
 func TestCloseNeverDeletesCachedFiles(t *testing.T) {
 	shared := filepath.Join(t.TempDir(), "cached.opus")
 	require.NoError(t, os.WriteFile(shared, []byte("media"), 0o644))
