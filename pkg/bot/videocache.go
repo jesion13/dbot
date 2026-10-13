@@ -52,13 +52,17 @@ func cachedTrack(url string, art backup.Artefact) player.Track {
 // Discord uploads both called Tramwaj.mp4 came back as id "Tramwaj" and overwrote each
 // other's file. origin_url is the primary key of artefacts, so hashing it makes the name
 // collision-free without having to trust the id.
-func artefactName(originURL, id string) string {
+func artefactName(originURL, id, ext string) string {
 	sum := sha256.Sum256([]byte(originURL))
 	safe := sanitiseArtefactID(id)
 	if safe == "" {
 		safe = "video"
 	}
-	return fmt.Sprintf("%s_%x.mp4", safe, sum[:4])
+	e := sanitiseArtefactID(ext)
+	if e == "" {
+		e = "mp4"
+	}
+	return fmt.Sprintf("%s_%x.%s", safe, sum[:4], e)
 }
 
 // maxArtefactIDLen bounds the id part of the name; the hash is 8 bytes and ".mp4" is
@@ -289,5 +293,20 @@ func (d *DBot) latestBackupJobs(ctx context.Context, gid, dir string, urls []str
 func (d *DBot) saveVideoInDir(url string, gID string, dir string) {
 	if _, err := d.scheduleBackup(d.Ctx, gID, dir, url); err != nil {
 		slog.Error("failed to schedule backup", slog.Any("error", err), slog.String("url", url))
+	}
+}
+
+// mediaTypeForExt keeps the stored media_type honest now that the file is whatever
+// yt-dlp produced.
+func mediaTypeForExt(ext string) string {
+	switch strings.ToLower(strings.TrimPrefix(ext, ".")) {
+	case "webm":
+		return "video/webm"
+	case "mkv":
+		return "video/x-matroska"
+	case "mp4", "m4v":
+		return "video/mp4"
+	default:
+		return "video/mp4"
 	}
 }

@@ -365,7 +365,33 @@ func runCmd(cmd *exec.Cmd) error {
 }
 
 // the returned file is closed when the context is canceled
+// The stored cache is decoded to mono opus for playback, so the picture is discarded
+// during playback either way and AV1 is the right target: it is roughly 30% smaller
+// than H.264 at the same quality, and on this hardware it also encodes faster than the
+// H.264 path.
+//
+// gq25, not something cheaper: videos get taken down, and the cache is the only copy
+// left. Measured over the same 30s of 4K, gq25 came to 9.7MB against 9.6MB for the
+// untouched source - it reproduces what youtube itself encodes at, so a fallback
+// transcode is indistinguishable from having downloaded an av1 original. gq30 was
+// 5.5MB and gq35 3.3MB; the savings are not worth losing the picture.
+//
+// Benchmarks are kept in data/bench-av1 (gitignored) if this ever needs re-tuning.
+const av1Quality = "25"
+
+// ConvertToMP4 is for files that leave the process and have to be playable by
+// something other than ffmpeg - discord rejects AV1 and VP9 on upload, so /to-mp4
+// still needs H.264.
 func ConvertToMP4(ctx context.Context, file string, clip Clip) (*os.File, error) {
+	return convert(ctx, file, clip, "h264_qsv", "23", "veryslow")
+}
+
+// ConvertToAV1 is for the playback cache, which only ffmpeg ever reads.
+func ConvertToAV1(ctx context.Context, file string, clip Clip) (*os.File, error) {
+	return convert(ctx, file, clip, "av1_qsv", av1Quality, "")
+}
+
+func convert(ctx context.Context, file string, clip Clip, encoder, quality, preset string) (*os.File, error) {
 	tmpDir, ok := ctx.Value(config.DirKey).(string)
 	if !ok || len(tmpDir) == 0 {
 		return nil, errors.New("nie dałeś temp dira debilu")
@@ -389,18 +415,15 @@ func ConvertToMP4(ctx context.Context, file string, clip Clip) (*os.File, error)
 	if clip.End > 0 {
 		cmd.Args = append(cmd.Args, "-t", fmt.Sprintf("%.2f", clip.End.Seconds()-clip.Start.Seconds()))
 	}
-	cmd.Args = append(
-		cmd.Args,
-		"-c:v", "h264_qsv",
-		"-global_quality", "23",
-		"-preset", "veryslow",
-		"-movflags", "+faststart",
-		mp4Path,
-	)
+	cmd.Args = append(cmd.Args, "-c:v", encoder, "-global_quality", quality)
+	if preset != "" {
+		cmd.Args = append(cmd.Args, "-preset", preset)
+	}
+	cmd.Args = append(cmd.Args, "-movflags", "+faststart", mp4Path)
 	cmd.Stdout = buf
 	cmd.Stderr = buf
 
-	slog.Info("convertToMP4", slog.String("cmd", cmd.String()))
+	slog.Info("convert", slog.String("encoder", encoder), slog.String("cmd", cmd.String()))
 	err := cmd.Start()
 	if err != nil {
 		return nil, fmt.Errorf("cmd.Start failed: %w", err)

@@ -41,6 +41,9 @@ type DBot struct {
 	ytdlp.YTDLP
 	// PlaylistInfoFunc fetches playlist metadata; nil means use yt-dlp.
 	PlaylistInfoFunc func(link string) (ytdlp.PlaylistMeta, error)
+	// DownloadVideoFunc fetches a video; nil means use yt-dlp. Exists for the same
+	// reason as PlaylistInfoFunc: the real one shells out and cannot run in a test.
+	DownloadVideoFunc func(ctx context.Context, link string) (ytdlp.VideoMeta, error)
 	// playerMu guards the pointer only, and is never held across a Close, which can
 	// take a while
 
@@ -201,6 +204,13 @@ func (d *DBot) playlistInfo(link string) (ytdlp.PlaylistMeta, error) {
 		return d.PlaylistInfoFunc(link)
 	}
 	return d.PlaylistInfo(link)
+}
+
+func (d *DBot) downloadVideo(ctx context.Context, link string) (ytdlp.VideoMeta, error) {
+	if d.DownloadVideoFunc != nil {
+		return d.DownloadVideoFunc(ctx, link)
+	}
+	return d.DownloadVideo(ctx, link)
 }
 
 func dbotErr(msg string, vars ...any) error {
@@ -374,7 +384,7 @@ func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
 
 	aliases := strings.Split(params.Aliases, ",")
 
-	f, err := d.downloadAsMP4(ctx, params.Link)
+	f, err := d.fetchVideo(ctx, params.Link)
 	if err != nil {
 		return fmt.Errorf("failed to download file '%s': %w", params.Link, err)
 	}
@@ -408,35 +418,70 @@ func (d *DBot) SaveSound(ctx context.Context, params SaveSoundParams) error {
 	return nil
 }
 
-type MP4File struct {
-	Filepath string
-	Name     string
-	File     *os.File
-	// Title and ID are what yt-dlp reported, before any filename trimming could have
-	// touched them. Both are needed after the download: the id to name the stored file
-	// and the title to record in the database.
-	Title string
-	ID    string
+// FetchedVideo is a downloaded video ready to be stored. Filepath is what the caller
+// must read from; SourcePath is the file to delete once the store has copied it.
+type FetchedVideo struct {
+	Filepath   string
+	Name       string
+	File       *os.File
+	SourcePath string
+	// Transcoded is false when the download was already AV1 and was stored as it came.
+	Transcoded bool
+	// Title and ID are what yt-dlp reported, before anything could have truncated
+	// them: the id names the stored file and the title is recorded in the database.
+	Title  string
+	ID     string
+	VCodec string
+	Ext    string
 }
 
-func (d *DBot) downloadAsMP4(ctx context.Context, url string) (MP4File, error) {
-	vi, err := d.DownloadVideo(ctx, url)
+// needsAV1Encode reports whether a download has to be re-encoded. An av1 source is
+// kept exactly as it is; everything else, including a download with no video stream at
+// all, is converted.
+func needsAV1Encode(vcodec string) bool {
+	return !strings.HasPrefix(vcodec, "av01")
+}
+
+// fetchVideo downloads a video for the playback cache and returns it already in AV1.
+//
+// A download that is already AV1 is kept exactly as it is: re-encoding it would make
+// the file larger (measured: a 4K AV1 source is 441MB, the same 18 minutes through the
+// old H.264 path came to 678MB), spend minutes of hardware encoding, and throw away
+// quality. Only a non-AV1 source is transcoded.
+func (d *DBot) fetchVideo(ctx context.Context, url string) (FetchedVideo, error) {
+	vi, err := d.downloadVideo(ctx, url)
 	if err != nil {
-		return MP4File{}, fmt.Errorf("'%s': %w", url, err)
+		return FetchedVideo{}, fmt.Errorf("'%s': %w", url, err)
 	}
 
-	f, err := ffmpeg.ConvertToMP4(ctx, vi.Filepath, ffmpeg.Clip{})
-	if err != nil {
-		return MP4File{}, fmt.Errorf("convertToMP4 failed '%s': %w", vi.Filepath, err)
+	fetched := FetchedVideo{
+		Filepath:   vi.Filepath,
+		Name:       vi.Filepath,
+		SourcePath: vi.Filepath,
+		Title:      vi.Title,
+		ID:         vi.ID,
+		VCodec:     vi.VCodec,
+		Ext:        vi.Ext,
+	}
+	if !needsAV1Encode(vi.VCodec) {
+		slog.Debug("fetchVideo: already av1, keeping the download", slog.String("vcodec", vi.VCodec))
+		f, err := os.Open(vi.Filepath)
+		if err != nil {
+			return FetchedVideo{}, fmt.Errorf("open download '%s': %w", vi.Filepath, err)
+		}
+		fetched.File = f
+		return fetched, nil
 	}
 
-	return MP4File{
-		Filepath: f.Name(),
-		Name:     f.Name(),
-		File:     f,
-		Title:    vi.Title,
-		ID:       vi.ID,
-	}, nil
+	f, err := ffmpeg.ConvertToAV1(ctx, vi.Filepath, ffmpeg.Clip{})
+	if err != nil {
+		return FetchedVideo{}, fmt.Errorf("convertToAV1 failed '%s': %w", vi.Filepath, err)
+	}
+	fetched.Filepath = f.Name()
+	fetched.Name = f.Name()
+	fetched.File = f
+	fetched.Transcoded = true
+	return fetched, nil
 }
 
 func (d *DBot) Ready(e *events.Ready) {

@@ -33,7 +33,7 @@ var ErrFailedToDownload = errors.New("yt-dlp: failed to download")
 
 const (
 	ytdlp          = "yt-dlp"
-	printAfterMove = "after_move:%(.{id,title,filepath,ext,original_url})j"
+	printAfterMove = "after_move:%(.{id,title,vcodec,filepath,ext,original_url})j"
 )
 
 var playlistInfoCMD, videoDownloadCMD, videoDownloadSmallCMD, audioDownloadCMD []string
@@ -46,6 +46,11 @@ var playlistInfoCMD, videoDownloadCMD, videoDownloadSmallCMD, audioDownloadCMD [
 // --trim-filenames is gone as a result: with no title in the name there is nothing to
 // trim, and leaving it set would silently truncate ids instead.
 const outputTemplate = "%(id)s.%(ext)s"
+
+// AV1 first, then whatever else exists. AV1 is around 30% smaller than H.264 at the
+// same visual quality, and the stored file is decoded to mono opus for playback, so
+// the extra resolution of a non-AV1 alternative is never seen.
+const formatBest = "bv*[vcodec=av01]+ba/bv*+ba/b"
 
 func init() {
 	go func() {
@@ -66,7 +71,7 @@ func init() {
 			"--print", printAfterMove,
 			"--no-playlist",
 			"-f",
-			"bestvideo+bestaudio/best",
+			formatBest,
 			"-o", outputTemplate,
 		}
 		videoDownloadSmallCMD = []string{
@@ -94,7 +99,10 @@ type VideoMeta struct {
 	// ID is yt-dlp's per-extractor id. It is a real, globally unique id for YouTube,
 	// but for direct links the generic extractor derives it from the URL filename, so
 	// it can collide between different videos and is not stable for the same one.
-	ID          string `json:"id"`
+	ID string `json:"id"`
+	// VCodec is the video codec of the downloaded file, e.g. "av01..." or "vp9".
+	// The caller uses it to decide whether a re-encode is needed at all.
+	VCodec      string `json:"vcodec"`
 	Title       string `json:"title"`
 	Ext         string `json:"ext"`
 	Filepath    string `json:"filepath"`

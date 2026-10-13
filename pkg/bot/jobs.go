@@ -72,7 +72,7 @@ func (d *DBot) backupVideoJob(meta string) error {
 	os.MkdirAll(dir, 0o755)
 	ctx = context.WithValue(ctx, config.DirKey, dir)
 
-	f, err := d.downloadAsMP4(ctx, bf.OriginUrl)
+	f, err := d.fetchVideo(ctx, bf.OriginUrl)
 	if err != nil {
 		if isUnavailableVideo(err) {
 			// still a playlist member, but youtube will not serve it. Retrying burns
@@ -84,17 +84,24 @@ func (d *DBot) backupVideoJob(meta string) error {
 		return fmt.Errorf("backupFile: %w", err)
 	}
 	defer f.File.Close()
-	// the converted temp file goes when the job ends; f.Name is that temp path and
-	// must not be confused with the stored name below
-	defer os.Remove(f.Name)
+	// Nothing removes the yt-dlp download today, so every converted video leaves its
+	// source behind and the temp dir grows by the size of the whole cache. The temp
+	// dir and BACKUP_DIR are usually different mounts, so the store copies and this
+	// deletes rather than renaming.
+	defer func() {
+		if err := os.Remove(f.SourcePath); err != nil && !os.IsNotExist(err) {
+			slog.Warn("could not remove the download after storing it", slog.String("path", f.SourcePath), slog.Any("error", err))
+		}
+	}()
 
 	bf.File = f.File
 	// the stored name is the yt-dlp id plus a hash of the source, never the title: a
 	// long title can exceed the filesystem's filename limit, and two different videos
-	// can share a title (and, for direct links, an id)
-	bf.Name = artefactName(bf.OriginUrl, f.ID)
+	// can share a title (and, for direct links, an id). The extension is the real one,
+	// so a stored webm is not called an mp4.
+	bf.Name = artefactName(bf.OriginUrl, f.ID, f.Ext)
 	bf.Title = f.Title
-	bf.ContentType = "video/mp4"
+	bf.ContentType = mediaTypeForExt(f.Ext)
 
 	slog.Debug("backupJob", slog.Any("bf", bf))
 	_, err = d.backupArtefact(ctx, bf)

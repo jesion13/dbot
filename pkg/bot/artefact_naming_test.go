@@ -55,24 +55,34 @@ func TestArtefactName(t *testing.T) {
 		name string
 		url  string
 		id   string
+		ext  string
 		want string
 	}{
 		{
-			name: "youtube id",
+			name: "webm keeps its real extension",
 			url:  "https://www.youtube.com/watch?v=0Rdg6GUv-wQ",
 			id:   "0Rdg6GUv-wQ",
-			want: "0Rdg6GUv-wQ_" + hash8("https://www.youtube.com/watch?v=0Rdg6GUv-wQ") + ".mp4",
+			ext:  "webm",
+			want: "0Rdg6GUv-wQ_" + hash8("https://www.youtube.com/watch?v=0Rdg6GUv-wQ") + ".webm",
 		},
 		{
-			name: "same video, different url form, different file",
+			name: "mp4 source stays mp4",
 			url:  "https://youtu.be/0Rdg6GUv-wQ",
 			id:   "0Rdg6GUv-wQ",
+			ext:  "mp4",
+			want: "0Rdg6GUv-wQ_" + hash8("https://youtu.be/0Rdg6GUv-wQ") + ".mp4",
+		},
+		{
+			name: "no extension falls back to mp4",
+			url:  "https://youtu.be/0Rdg6GUv-wQ",
+			id:   "0Rdg6GUv-wQ",
+			ext:  "",
 			want: "0Rdg6GUv-wQ_" + hash8("https://youtu.be/0Rdg6GUv-wQ") + ".mp4",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, artefactName(tt.url, tt.id))
+			assert.Equal(t, tt.want, artefactName(tt.url, tt.id, tt.ext))
 		})
 	}
 }
@@ -85,18 +95,18 @@ func TestArtefactNameSeparatesDifferentVideosWithTheSameID(t *testing.T) {
 	const a = "https://cdn.discordapp.com/ephemeral-attachments/1328383992982016032/1507135996083437709/Tramwaj.mp4?ex=6a10cd46"
 	const b = "https://cdn.discordapp.com/ephemeral-attachments/1328383992982016032/1507136191991123988/Tramwaj.mp4?ex=6a10cd75"
 
-	assert.NotEqual(t, artefactName(a, "Tramwaj"), artefactName(b, "Tramwaj"),
+	assert.NotEqual(t, artefactName(a, "Tramwaj", "webm"), artefactName(b, "Tramwaj", "webm"),
 		"two different videos sharing an id must not share a file")
 
 	const dupa = "https://cdn.discordapp.com/ephemeral-attachments/1328383992982016032/1462921659064516758/dupa.mp4"
 	const dupa2 = "https://cdn.discordapp.com/attachments/705088351778111608/1531057784341135420/dupa.mp4"
-	assert.NotEqual(t, artefactName(dupa, "dupa"), artefactName(dupa2, "dupa_1"))
+	assert.NotEqual(t, artefactName(dupa, "dupa", "webm"), artefactName(dupa2, "dupa_1", "webm"))
 }
 
 // A generic-extractor id comes from a url filename and can contain anything.
 func TestArtefactNameSanitisesTheID(t *testing.T) {
 	url := "https://example.com/x"
-	name := artefactName(url, "../../etc/passwd")
+	name := artefactName(url, "../../etc/passwd", "mp4")
 
 	assert.NotContains(t, name, "/")
 	assert.NotContains(t, name, "..")
@@ -105,8 +115,8 @@ func TestArtefactNameSanitisesTheID(t *testing.T) {
 
 func TestArtefactNameHandlesAnEmptyID(t *testing.T) {
 	url := "https://example.com/y"
-	assert.Equal(t, "video_"+hash8(url)+".mp4", artefactName(url, ""))
-	assert.Equal(t, "video_"+hash8(url)+".mp4", artefactName(url, "///"))
+	assert.Equal(t, "video_"+hash8(url)+".mp4", artefactName(url, "", ""))
+	assert.Equal(t, "video_"+hash8(url)+".mp4", artefactName(url, "///", ""))
 }
 
 // The whole point: a long, unicode, filename-hostile title never reaches the filesystem.
@@ -116,9 +126,9 @@ func TestArtefactNameIgnoresTheTitleEntirely(t *testing.T) {
 	for range 4000 {
 		long += "\U0001D7ED"
 	}
-	assert.Equal(t, artefactName(url, "v-t1ikF9ftA"), artefactName(url, "v-t1ikF9ftA"),
+	assert.Equal(t, artefactName(url, "v-t1ikF9ftA", "webm"), artefactName(url, "v-t1ikF9ftA", "webm"),
 		"the title is not an input, so it cannot change the name")
-	assert.Less(t, len(artefactName(url, "v-t1ikF9ftA")), 80,
+	assert.Less(t, len(artefactName(url, "v-t1ikF9ftA", "webm")), 80,
 		"even with a %d byte title in play the name stays tiny", len(long))
 }
 
@@ -128,11 +138,11 @@ func TestArtefactNameFitsTheFilesystemLimit(t *testing.T) {
 	for range 500 {
 		long += "a"
 	}
-	assert.LessOrEqual(t, len(artefactName("https://x", long)), 255)
+	assert.LessOrEqual(t, len(artefactName("https://x", long, "webm")), 255)
 }
 
 func hash8(s string) string {
-	got := artefactName(s, "h")
+	got := artefactName(s, "h", "mp4")
 	// reuse the helper rather than duplicating the hash
 	sum := got[len("h_") : len(got)-len(".mp4")]
 	return sum
@@ -270,7 +280,7 @@ func TestBackupArtefactPersistsTheTitle(t *testing.T) {
 	tb := newTestBot(t)
 	url := canonicalVideoURL("v-t1ikF9ftA")
 
-	name := artefactName(url, "v-t1ikF9ftA")
+	name := artefactName(url, "v-t1ikF9ftA", "webm")
 	full := filepath.Join(config.BACKUP_DIR, name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
 	require.NoError(t, os.WriteFile(full, []byte("media"), 0o644))
@@ -319,11 +329,11 @@ func TestBackupArtefactRepairKeepsTheTitle(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	store("first_ab12cd34.mp4", "First Title")
-	store("second_ef56ab78.mp4", "Second Title")
+	store("first_ab12cd34.webm", "First Title")
+	store("second_ef56ab78.webm", "Second Title")
 
 	art, err := tb.Backup.GetArtefact(tb.Ctx, url)
 	require.NoError(t, err)
-	assert.Equal(t, "second_ef56ab78.mp4", filepath.Base(art.Path))
+	assert.Equal(t, "second_ef56ab78.webm", filepath.Base(art.Path))
 	assert.Equal(t, "Second Title", art.Title, "a repair must carry the title too")
 }
