@@ -5,8 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"dbot/pkg/backup"
 	"dbot/pkg/config"
+	"dbot/pkg/store"
 	"dbot/pkg/ytdlp"
 
 	"github.com/stretchr/testify/assert"
@@ -151,4 +154,144 @@ func TestBackupJobStoresAndThenDeletesTheDownload(t *testing.T) {
 	// and the download is gone, which is what used to leak
 	assert.NoFileExists(t, download,
 		"the yt-dlp download must be removed once it has been stored")
+}
+
+// mustMeta builds the exact job meta for a video, which is what the tool matches on.
+func mustMeta(t *testing.T, url string) string {
+	t.Helper()
+	m, err := backupJobMeta(testGID, videoBackupDir, url)
+	require.NoError(t, err)
+	return m
+}
+
+// --- requeueing videos whose file is gone ------------------------------------
+
+// putArtefact indexes a video and, unless keepFile is false, writes its file.
+func putArtefact(t *testing.T, tb *testBot, url, name string, keepFile bool) {
+	t.Helper()
+	rel := testGID + "/" + videoBackupDir + "/" + name
+	if keepFile {
+		full := filepath.Join(config.BACKUP_DIR, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(full), 0o755))
+		require.NoError(t, os.WriteFile(full, []byte("media"), 0o644))
+	}
+	err := tb.Backup.InsertArtefact(tb.Ctx, backup.InsertArtefactParams{
+		OriginUrl: url, Path: rel, MediaType: "video/webm",
+		CreatedAt: time.Now(), Gid: testGID,
+	})
+	require.NoError(t, err)
+}
+
+func pendingJobs(t *testing.T, tb *testBot) int64 {
+	t.Helper()
+	var n int64
+	row := rawStore(t, tb).QueryRowContext(tb.Ctx,
+		`SELECT count(*) FROM queue WHERE status NOT IN ('done','unavailable')`)
+	require.NoError(t, row.Scan(&n))
+	return n
+}
+
+func TestRequeueQueuesOnlyTheMissingFiles(t *testing.T) {
+	tb := newTestBot(t)
+	here := canonicalVideoURL("present1")
+	gone := canonicalVideoURL("missing1")
+	putArtefact(t, tb, here, "present1_aaaaaaaa.mp4", true)
+	putArtefact(t, tb, gone, "missing1_bbbbbbbb.mp4", false)
+
+	res, err := RequeueMissingArtefacts(tb.Ctx, tb.Store, tb.Backup, false)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, res.Scanned)
+	assert.Equal(t, 1, res.Present, "a file that exists must be left alone")
+	assert.Equal(t, 1, res.Enqueued, "a file that is gone must be queued")
+	assert.Equal(t, int64(1), pendingJobs(t, tb))
+}
+
+func TestRequeueDryRunWritesNothing(t *testing.T) {
+	tb := newTestBot(t)
+	putArtefact(t, tb, canonicalVideoURL("missing1"), "missing1_bbbbbbbb.mp4", false)
+
+	res, err := RequeueMissingArtefacts(tb.Ctx, tb.Store, tb.Backup, true)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, res.Enqueued, "the dry run still reports what it would do")
+	assert.Zero(t, pendingJobs(t, tb), "but writes no queue row")
+}
+
+// A video already waiting must not get a second job, and one youtube refuses must not
+// be retried at all.
+func TestRequeueRespectsExistingJobState(t *testing.T) {
+	t.Run("pending is not queued twice", func(t *testing.T) {
+		tb := newTestBot(t)
+		url := canonicalVideoURL("waiting1")
+		putArtefact(t, tb, url, "waiting1_cccccccc.mp4", false)
+		_, err := tb.Store.Enqueue(tb.Ctx, store.EnqueueParams{
+			Meta: mustMeta(t, url), JobType: BackupJob, Status: "failing",
+		})
+		require.NoError(t, err)
+
+		res, err := RequeueMissingArtefacts(tb.Ctx, tb.Store, tb.Backup, false)
+		require.NoError(t, err)
+		assert.Equal(t, 1, res.Pending)
+		assert.Zero(t, res.Enqueued)
+		assert.Equal(t, int64(1), pendingJobs(t, tb))
+	})
+
+	t.Run("unavailable is not retried", func(t *testing.T) {
+		tb := newTestBot(t)
+		url := canonicalVideoURL("dead1")
+		putArtefact(t, tb, url, "dead1_dddddddd.mp4", false)
+		_, err := tb.Store.Enqueue(tb.Ctx, store.EnqueueParams{
+			Meta: mustMeta(t, url), JobType: BackupJob, Status: "unavailable",
+		})
+		require.NoError(t, err)
+
+		res, err := RequeueMissingArtefacts(tb.Ctx, tb.Store, tb.Backup, false)
+		require.NoError(t, err)
+		assert.Equal(t, 1, res.Unavailable)
+		assert.Zero(t, res.Enqueued)
+		assert.Zero(t, pendingJobs(t, tb), "a dead video must not be retried")
+	})
+}
+
+// Running twice must not double-queue.
+func TestRequeueIsIdempotent(t *testing.T) {
+	tb := newTestBot(t)
+	putArtefact(t, tb, canonicalVideoURL("missing1"), "missing1_bbbbbbbb.mp4", false)
+
+	res, err := RequeueMissingArtefacts(tb.Ctx, tb.Store, tb.Backup, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Enqueued)
+
+	res, err = RequeueMissingArtefacts(tb.Ctx, tb.Store, tb.Backup, false)
+	require.NoError(t, err)
+	assert.Zero(t, res.Enqueued, "a second pass has nothing to add")
+	assert.Equal(t, int64(1), pendingJobs(t, tb))
+}
+
+// Only video rows are candidates. A path without the video directory in it is not
+// scanned at all, so the tool never has to guess a guild or directory from it.
+func TestRequeueOnlyLooksAtVideoRows(t *testing.T) {
+	tb := newTestBot(t)
+	putArtefact(t, tb, canonicalVideoURL("video1"), "video1_eeeeeeee.mp4", false)
+	err := tb.Backup.InsertArtefact(tb.Ctx, backup.InsertArtefactParams{
+		OriginUrl: "https://x/sound.mp4", Path: testGID + "/sounds/sound.mp4",
+		MediaType: "video/mp4", CreatedAt: time.Now(), Gid: testGID,
+	})
+	require.NoError(t, err)
+
+	res, err := RequeueMissingArtefacts(tb.Ctx, tb.Store, tb.Backup, false)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Scanned, "a sound is not a cached video")
+	assert.Equal(t, 1, res.Enqueued)
+}
+
+func TestGuildAndDir(t *testing.T) {
+	gid, dir := guildAndDir("492318912881491981/play_history/edit.X [id].mp4")
+	assert.Equal(t, "492318912881491981", gid)
+	assert.Equal(t, "play_history", dir)
+
+	gid, dir = guildAndDir("flat.mp4")
+	assert.Empty(t, gid)
+	assert.Empty(t, dir)
 }

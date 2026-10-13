@@ -229,14 +229,17 @@ func backupStateFor(latest *store.Queue) (backupState, bool) {
 	return backupScheduled, true
 }
 
-func (d *DBot) scheduleBackup(ctx context.Context, gid, dir, url string) (backupState, error) {
+// ScheduleBackup queues a download for a url unless one is already pending, parked as
+// unavailable, or still within its retry budget. It is a plain function so the offline
+// tools in cmd/ share the bot's decision instead of reimplementing it.
+func ScheduleBackup(ctx context.Context, q *store.Queries, gid, dir, url string) (backupState, error) {
 	meta, err := backupJobMeta(gid, dir, url)
 	if err != nil {
 		return backupError, err
 	}
 
 	var latest *store.Queue
-	switch row, err := d.Store.LatestJob(ctx, store.LatestJobParams{JobType: BackupJob, Meta: meta}); {
+	switch row, err := q.LatestJob(ctx, store.LatestJobParams{JobType: BackupJob, Meta: meta}); {
 	case err == nil:
 		latest = &row
 	case errors.Is(err, sql.ErrNoRows):
@@ -249,10 +252,14 @@ func (d *DBot) scheduleBackup(ctx context.Context, gid, dir, url string) (backup
 		return state, nil
 	}
 
-	if _, err := d.Store.Enqueue(ctx, store.EnqueueParams{Meta: meta, JobType: BackupJob}); err != nil {
+	if _, err := q.Enqueue(ctx, store.EnqueueParams{Meta: meta, JobType: BackupJob}); err != nil {
 		return backupError, fmt.Errorf("enqueue backup for '%s': %w", url, err)
 	}
 	return backupScheduled, nil
+}
+
+func (d *DBot) scheduleBackup(ctx context.Context, gid, dir, url string) (backupState, error) {
+	return ScheduleBackup(ctx, d.Store, gid, dir, url)
 }
 
 // latestBackupJobs is the batch form: the newest job row per url for a whole playlist,
@@ -309,4 +316,81 @@ func mediaTypeForExt(ext string) string {
 	default:
 		return "video/mp4"
 	}
+}
+
+// RequeueResult counts what a requeue pass found.
+type RequeueResult struct {
+	Scanned     int
+	Present     int
+	Enqueued    int
+	Pending     int
+	Unavailable int
+}
+
+// RequeueMissingArtefacts queues a download for every cached video whose file is no
+// longer on disk.
+//
+// Nothing re-fetches these on its own: cachedVideo treats a missing file as a miss, but
+// the url is only re-downloaded when somebody plays it again, so a file lost by a bad
+// rsync or a manual tidy is only noticed when that specific video is wanted.
+//
+// A missing file is not an error to repair in the database - the row is still correct,
+// and the job re-checks the cache itself before downloading, so queueing a video that
+// has since come back costs one cheap lookup.
+func RequeueMissingArtefacts(ctx context.Context, q *store.Queries, b *backup.Queries, dryRun bool) (RequeueResult, error) {
+	var res RequeueResult
+
+	arts, err := b.ListVideoArtefacts(ctx)
+	if err != nil {
+		return res, fmt.Errorf("list artefacts: %w", err)
+	}
+
+	for _, a := range arts {
+		res.Scanned++
+		if _, err := os.Stat(artefactFile(a.Path)); err == nil {
+			res.Present++
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return res, fmt.Errorf("stat '%s': %w", a.Path, err)
+		}
+
+		gid, dir := guildAndDir(a.Path)
+		if gid == "" || dir == "" {
+			slog.Warn("requeue: unusable artefact path, skipped", slog.String("path", a.Path))
+			continue
+		}
+
+		if dryRun {
+			res.Enqueued++
+			slog.Info("requeue (dry run)", slog.String("url", a.OriginUrl), slog.String("path", a.Path))
+			continue
+		}
+
+		state, err := ScheduleBackup(ctx, q, gid, dir, a.OriginUrl)
+		if err != nil {
+			return res, fmt.Errorf("queue '%s': %w", a.OriginUrl, err)
+		}
+		switch state {
+		case backupScheduled:
+			res.Enqueued++
+			slog.Info("requeue: queued", slog.String("url", a.OriginUrl), slog.String("path", a.Path))
+		case backupPending:
+			res.Pending++
+		case backupUnavailable:
+			res.Unavailable++
+			slog.Info("requeue: youtube refuses this one, not queued", slog.String("url", a.OriginUrl))
+		case backupError:
+			return res, fmt.Errorf("queue '%s': scheduling failed", a.OriginUrl)
+		}
+	}
+	return res, nil
+}
+
+// guildAndDir reads the "<gid>/<dir>/<name>" an artefact path is stored as.
+func guildAndDir(path string) (gid, dir string) {
+	parts := strings.Split(path, "/")
+	if len(parts) < 3 {
+		return "", ""
+	}
+	return parts[0], parts[1]
 }
