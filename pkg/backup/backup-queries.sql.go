@@ -7,65 +7,19 @@ package backup
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"time"
 )
 
-const deleteArtefact = `-- name: DeleteArtefact :exec
-DELETE FROM artefacts WHERE gid = ?1 AND chid = ?2 and msgid = ?3
+const allArtefacts = `-- name: AllArtefacts :many
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title, band0, band1, band2, band3 FROM artefacts WHERE gid = ?1
 `
 
-type DeleteArtefactParams struct {
-	Gid   string
-	Chid  string
-	Msgid string
-}
-
-func (q *Queries) DeleteArtefact(ctx context.Context, arg DeleteArtefactParams) error {
-	_, err := q.db.ExecContext(ctx, deleteArtefact, arg.Gid, arg.Chid, arg.Msgid)
-	return err
-}
-
-const getArtefact = `-- name: GetArtefact :one
-SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title FROM artefacts WHERE origin_url = ?1
-`
-
-func (q *Queries) GetArtefact(ctx context.Context, originUrl string) (Artefact, error) {
-	row := q.db.QueryRowContext(ctx, getArtefact, originUrl)
-	var i Artefact
-	err := row.Scan(
-		&i.OriginUrl,
-		&i.Path,
-		&i.MediaType,
-		&i.Hash,
-		&i.CreatedAt,
-		&i.Gid,
-		&i.Chid,
-		&i.Msgid,
-		&i.Title,
-	)
-	return i, err
-}
-
-const getArtefacts = `-- name: GetArtefacts :many
-SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title FROM artefacts
-WHERE
-    media_type in ('image/jpg','image/jpeg','image/png','image/webp')
-AND
-    gid = ?
-AND
-    created_at >= ?
-`
-
-type GetArtefactsParams struct {
-	Gid       string
-	CreatedAt time.Time
-}
-
-// The dupe scan runs on every posted image and compares against the whole archive, so
-// it only looks at a recent window. Older uploads are never reported as duplicates.
-func (q *Queries) GetArtefacts(ctx context.Context, arg GetArtefactsParams) ([]Artefact, error) {
-	rows, err := q.db.QueryContext(ctx, getArtefacts, arg.Gid, arg.CreatedAt)
+// The unfiltered counterparty to GetArtefactCandidates: no banding, no window. It exists
+// so the dupe tests can compare the prefiltered scan against a full scan of the guild.
+func (q *Queries) AllArtefacts(ctx context.Context, gid string) ([]Artefact, error) {
+	rows, err := q.db.QueryContext(ctx, allArtefacts, gid)
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +37,133 @@ func (q *Queries) GetArtefacts(ctx context.Context, arg GetArtefactsParams) ([]A
 			&i.Chid,
 			&i.Msgid,
 			&i.Title,
+			&i.Band0,
+			&i.Band1,
+			&i.Band2,
+			&i.Band3,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const deleteArtefact = `-- name: DeleteArtefact :exec
+DELETE FROM artefacts WHERE gid = ?1 AND chid = ?2 and msgid = ?3
+`
+
+type DeleteArtefactParams struct {
+	Gid   string
+	Chid  string
+	Msgid string
+}
+
+func (q *Queries) DeleteArtefact(ctx context.Context, arg DeleteArtefactParams) error {
+	_, err := q.db.ExecContext(ctx, deleteArtefact, arg.Gid, arg.Chid, arg.Msgid)
+	return err
+}
+
+const getArtefact = `-- name: GetArtefact :one
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title, band0, band1, band2, band3 FROM artefacts WHERE origin_url = ?1
+`
+
+func (q *Queries) GetArtefact(ctx context.Context, originUrl string) (Artefact, error) {
+	row := q.db.QueryRowContext(ctx, getArtefact, originUrl)
+	var i Artefact
+	err := row.Scan(
+		&i.OriginUrl,
+		&i.Path,
+		&i.MediaType,
+		&i.Hash,
+		&i.CreatedAt,
+		&i.Gid,
+		&i.Chid,
+		&i.Msgid,
+		&i.Title,
+		&i.Band0,
+		&i.Band1,
+		&i.Band2,
+		&i.Band3,
+	)
+	return i, err
+}
+
+const getArtefactCandidates = `-- name: GetArtefactCandidates :many
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title, band0, band1, band2, band3 FROM artefacts
+WHERE artefacts.gid = ?1
+  AND artefacts.media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+  AND artefacts.created_at >= ?2 AND artefacts.band0 = ?3
+UNION ALL
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title, band0, band1, band2, band3 FROM artefacts
+WHERE artefacts.gid = ?1
+  AND artefacts.media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+  AND artefacts.created_at >= ?2 AND artefacts.band1 = ?4
+UNION ALL
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title, band0, band1, band2, band3 FROM artefacts
+WHERE artefacts.gid = ?1
+  AND artefacts.media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+  AND artefacts.created_at >= ?2 AND artefacts.band2 = ?5
+UNION ALL
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title, band0, band1, band2, band3 FROM artefacts
+WHERE artefacts.gid = ?1
+  AND artefacts.media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+  AND artefacts.created_at >= ?2 AND artefacts.band3 = ?6
+`
+
+type GetArtefactCandidatesParams struct {
+	Gid       string
+	CreatedAt time.Time
+	Band0     sql.NullInt64
+	Band1     sql.NullInt64
+	Band2     sql.NullInt64
+	Band3     sql.NullInt64
+}
+
+// The dupe scan runs on every posted image and compares against the whole archive, so
+// it only looks at a recent window. Older uploads are never reported as duplicates.
+//
+// One branch per hash chunk, each hitting its own index. UNION ALL (not a single
+// `band IN (...)`): the pigeonhole test needs chunk i compared with chunk i, and SQLite
+// only picks the per-branch indexes for a UNION or, after ANALYZE, for a MULTI-INDEX OR.
+// A row matching on two chunks comes back twice; that is harmless because the caller
+// re-checks the real Hamming distance.
+func (q *Queries) GetArtefactCandidates(ctx context.Context, arg GetArtefactCandidatesParams) ([]Artefact, error) {
+	rows, err := q.db.QueryContext(ctx, getArtefactCandidates,
+		arg.Gid,
+		arg.CreatedAt,
+		arg.Band0,
+		arg.Band1,
+		arg.Band2,
+		arg.Band3,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Artefact
+	for rows.Next() {
+		var i Artefact
+		if err := rows.Scan(
+			&i.OriginUrl,
+			&i.Path,
+			&i.MediaType,
+			&i.Hash,
+			&i.CreatedAt,
+			&i.Gid,
+			&i.Chid,
+			&i.Msgid,
+			&i.Title,
+			&i.Band0,
+			&i.Band1,
+			&i.Band2,
+			&i.Band3,
 		); err != nil {
 			return nil, err
 		}
@@ -98,7 +179,7 @@ func (q *Queries) GetArtefacts(ctx context.Context, arg GetArtefactsParams) ([]A
 }
 
 const getArtefactsByURLs = `-- name: GetArtefactsByURLs :many
-SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title FROM artefacts
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title, band0, band1, band2, band3 FROM artefacts
 WHERE origin_url IN (/*SLICE:origin_urls*/?)
 `
 
@@ -131,6 +212,10 @@ func (q *Queries) GetArtefactsByURLs(ctx context.Context, originUrls []string) (
 			&i.Chid,
 			&i.Msgid,
 			&i.Title,
+			&i.Band0,
+			&i.Band1,
+			&i.Band2,
+			&i.Band3,
 		); err != nil {
 			return nil, err
 		}
@@ -204,7 +289,7 @@ func (q *Queries) InsertBackup(ctx context.Context, arg InsertBackupParams) erro
 }
 
 const listVideoArtefacts = `-- name: ListVideoArtefacts :many
-SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title FROM artefacts WHERE path LIKE '%/play_history/%'
+SELECT origin_url, path, media_type, hash, created_at, gid, chid, msgid, title, band0, band1, band2, band3 FROM artefacts WHERE path LIKE '%/play_history/%'
 `
 
 // The backfill reads titles out of the filenames the old scheme produced, so it only
@@ -228,6 +313,10 @@ func (q *Queries) ListVideoArtefacts(ctx context.Context) ([]Artefact, error) {
 			&i.Chid,
 			&i.Msgid,
 			&i.Title,
+			&i.Band0,
+			&i.Band1,
+			&i.Band2,
+			&i.Band3,
 		); err != nil {
 			return nil, err
 		}

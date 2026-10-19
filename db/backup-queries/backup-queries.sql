@@ -26,14 +26,32 @@ WHERE origin_url = :origin_url;
 
 -- The dupe scan runs on every posted image and compares against the whole archive, so
 -- it only looks at a recent window. Older uploads are never reported as duplicates.
--- name: GetArtefacts :many
+--
+-- One branch per hash chunk, each hitting its own index. UNION ALL (not a single
+-- `band IN (...)`): the pigeonhole test needs chunk i compared with chunk i, and SQLite
+-- only picks the per-branch indexes for a UNION or, after ANALYZE, for a MULTI-INDEX OR.
+-- A row matching on two chunks comes back twice; that is harmless because the caller
+-- re-checks the real Hamming distance.
+-- name: GetArtefactCandidates :many
 SELECT * FROM artefacts
-WHERE
-    media_type in ('image/jpg','image/jpeg','image/png','image/webp')
-AND
-    gid = ?
-AND
-    created_at >= ?;
+WHERE artefacts.gid = :gid
+  AND artefacts.media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+  AND artefacts.created_at >= :created_at AND artefacts.band0 = :band0
+UNION ALL
+SELECT * FROM artefacts
+WHERE artefacts.gid = :gid
+  AND artefacts.media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+  AND artefacts.created_at >= :created_at AND artefacts.band1 = :band1
+UNION ALL
+SELECT * FROM artefacts
+WHERE artefacts.gid = :gid
+  AND artefacts.media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+  AND artefacts.created_at >= :created_at AND artefacts.band2 = :band2
+UNION ALL
+SELECT * FROM artefacts
+WHERE artefacts.gid = :gid
+  AND artefacts.media_type in ('image/jpg','image/jpeg','image/png','image/webp')
+  AND artefacts.created_at >= :created_at AND artefacts.band3 = :band3;
 
 -- name: GetArtefactsByURLs :many
 SELECT * FROM artefacts
@@ -52,6 +70,11 @@ UPDATE artefacts SET title = :title WHERE origin_url = :origin_url;
 
 -- name: GetArtefact :one
 SELECT * FROM artefacts WHERE origin_url = :origin_url;
+
+-- The unfiltered counterparty to GetArtefactCandidates: no banding, no window. It exists
+-- so the dupe tests can compare the prefiltered scan against a full scan of the guild.
+-- name: AllArtefacts :many
+SELECT * FROM artefacts WHERE gid = :gid;
 
 
 -- name: UpsertUser :one

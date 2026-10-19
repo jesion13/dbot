@@ -3,6 +3,7 @@ package dbot
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -10,6 +11,7 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
+	"math/bits"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -203,12 +205,45 @@ func (d *DBot) backupArtefact(ctx context.Context, params BackupFileParams) (Bac
 // growing without bound as the archive fills.
 const dupeScanWindow = 6 * 30 * 24 * time.Hour
 
-func (d *DBot) checkHashAgainstDB(gid string, hash uint64) (art backup.Artefact, unique bool) {
-	hash1 := goimagehash.NewExtImageHash([]uint64{hash}, goimagehash.DHash, 64)
+// dupeThreshold is how many of the 64 hash bits may differ and still count as the same
+// picture. 0-5 is the "virtually identical" band; above that false positives climb, and
+// a higher threshold also breaks dupeBands below.
+const dupeThreshold = 3
 
-	data, err := d.Backup.GetArtefacts(d.Ctx, backup.GetArtefactsParams{
+// dupeBands is how many 16-bit chunks the hash is split into for the SQL prefilter.
+// Pigeonhole: two hashes within dupeThreshold bits must agree exactly on at least one
+// chunk, because dupeThreshold flipped bits cannot touch dupeBands > dupeThreshold chunks.
+// So filtering on chunk equality drops no true match, and the caller verifies the real
+// Hamming distance on the (small) candidate set.
+const dupeBands = 4
+
+// dupeBandValues returns the query hash split into dupeBands 16-bit chunks, most
+// significant first, matching the generated band0..band3 columns. sqlc types these
+// parameters as nullable, hence NullInt64.
+func dupeBandValues(hash uint64) (bands [dupeBands]sql.NullInt64) {
+	for i := range dupeBands {
+		shift := uint(64 - 16*(i+1))
+		bands[i] = sql.NullInt64{Int64: int64((hash >> shift) & 0xFFFF), Valid: true}
+	}
+	return bands
+}
+
+func (d *DBot) checkHashAgainstDB(gid string, hash uint64) (art backup.Artefact, unique bool) {
+	return d.checkHashAgainstDBSkip(gid, hash, "")
+}
+
+// checkHashAgainstDBSkip is checkHashAgainstDB with one origin_url ignored, so a test can
+// compare against a reference scan without the query matching its own row.
+func (d *DBot) checkHashAgainstDBSkip(gid string, hash uint64, skipURL string) (art backup.Artefact, unique bool) {
+	bands := dupeBandValues(hash)
+
+	data, err := d.Backup.GetArtefactCandidates(d.Ctx, backup.GetArtefactCandidatesParams{
 		Gid:       gid,
 		CreatedAt: time.Now().Add(-dupeScanWindow),
+		Band0:     bands[0],
+		Band1:     bands[1],
+		Band2:     bands[2],
+		Band3:     bands[3],
 	})
 	if err != nil {
 		slog.Error("failed to get Artiefacts", slog.Any("error", err))
@@ -216,13 +251,10 @@ func (d *DBot) checkHashAgainstDB(gid string, hash uint64) (art backup.Artefact,
 	}
 
 	for _, a := range data {
-		hash2 := goimagehash.NewExtImageHash([]uint64{uint64(a.Hash)}, goimagehash.DHash, 64)
-		dist, err := hash1.Distance(hash2)
-		if err != nil {
-			slog.Error("failed to calc distance", slog.Any("error", err))
+		if a.OriginUrl == skipURL {
 			continue
 		}
-		if dist <= 3 {
+		if dist := bits.OnesCount64(hash ^ uint64(a.Hash)); dist <= dupeThreshold {
 			slog.Debug("[dupa]", slog.Any("dist", dist))
 			return a, false
 		}

@@ -5,6 +5,7 @@
 package backup
 
 import (
+	"database/sql"
 	"time"
 )
 
@@ -18,6 +19,10 @@ type Artefact struct {
 	Chid      string
 	Msgid     string
 	Title     string
+	Band0     sql.NullInt64
+	Band1     sql.NullInt64
+	Band2     sql.NullInt64
+	Band3     sql.NullInt64
 }
 
 type MsgBackup struct {
