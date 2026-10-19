@@ -514,8 +514,12 @@ type panelClickResult struct {
 // id and the generation must match, so a message that outlived its deletion is still
 // refused.
 func (d *DBot) resolvePanelClick(c panelClick) panelClickResult {
-	if reason := d.voiceGuard(c.GuildID, c.UserID); reason != "" {
-		return panelClickResult{Reject: reason}
+	// The event button joins a voice channel itself, so it is the one action that may
+	// be pressed with no connection; everything else needs the bot already in one.
+	if c.Action != playerPanelBtnEvent {
+		if reason := d.voiceGuard(c.GuildID, c.UserID); reason != "" {
+			return panelClickResult{Reject: reason}
+		}
 	}
 	cur, ok := d.panels.active(c.GuildID)
 	switch {
@@ -563,7 +567,7 @@ func queueErrText(err error, fallback string) string {
 
 // panelAction maps one button onto the existing player or sound path. It builds no
 // queue of its own and keeps no state.
-func (d *DBot) panelAction(action string, gid snowflake.ID) error {
+func (d *DBot) panelAction(action string, gid, userID snowflake.ID) error {
 	switch action {
 	case playerPanelBtnPrev:
 		if err := d.Player().Previous(); err != nil {
@@ -578,7 +582,7 @@ func (d *DBot) panelAction(action string, gid snowflake.ID) error {
 			return errors.New(queueErrText(err, "nothing to skip to"))
 		}
 	case playerPanelBtnEvent:
-		return d.queueRandomSound(gid.String())
+		return d.playEvent(gid, userID)
 	default:
 		return fmt.Errorf("unknown player panel action %q", action)
 	}
@@ -630,7 +634,7 @@ func (d *DBot) onPanelComponent(ctx context.Context, e *events.ComponentInteract
 		return
 	}
 
-	if err := d.panelAction(c.Action, *gid); err != nil {
+	if err := d.panelAction(c.Action, *gid, c.UserID); err != nil {
 		slog.Error("player panel action failed", slog.String("action", c.Action), slog.Any("error", err))
 		d.replyFollowup(e, err.Error())
 		return
@@ -677,6 +681,17 @@ func (d *DBot) queueRandomSound(gid string) error {
 		return err
 	}
 	return d.Player().EnqueueSoundSequence(seq)
+}
+
+// playEvent is `event 1` from the panel: the same join-then-enqueue path the text
+// command takes. A panel left behind in a channel the bot has already left voice
+// still works, because the press puts the bot back into the clicker's channel.
+// Runs after the interaction is acknowledged, so a slow voice open cannot expire it.
+func (d *DBot) playEvent(gid, userID snowflake.ID) error {
+	if err := d.connectVoice(gid, userID); err != nil {
+		return errors.New("join a voice channel first")
+	}
+	return d.queueRandomSound(gid.String())
 }
 
 func randomSoundSequence(db *store.Queries, gid string) (player.SoundSequence, error) {

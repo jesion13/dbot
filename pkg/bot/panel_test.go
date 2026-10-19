@@ -477,7 +477,7 @@ func TestPanelPreviousButtonGoesBackOnePosition(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(4)...)
 	require.NoError(t, tb.Player().JumpTo(3))
 
-	require.NoError(t, tb.panelAction(playerPanelBtnPrev, panelGID))
+	require.NoError(t, tb.panelAction(playerPanelBtnPrev, panelGID, panelUser))
 
 	assert.Equal(t, 2, tb.Player().QueueSnapshot().CurrentIndex)
 }
@@ -486,10 +486,10 @@ func TestPanelPauseButtonTogglesManualPause(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 	require.False(t, tb.Player().Paused())
 
-	require.NoError(t, tb.panelAction(playerPanelBtnPause, panelGID))
+	require.NoError(t, tb.panelAction(playerPanelBtnPause, panelGID, panelUser))
 	assert.True(t, tb.Player().Paused())
 
-	require.NoError(t, tb.panelAction(playerPanelBtnPause, panelGID))
+	require.NoError(t, tb.panelAction(playerPanelBtnPause, panelGID, panelUser))
 	assert.False(t, tb.Player().Paused())
 }
 
@@ -497,7 +497,7 @@ func TestPanelNextButtonKeepsWraparound(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(3)...)
 	require.NoError(t, tb.Player().JumpTo(3))
 
-	require.NoError(t, tb.panelAction(playerPanelBtnNext, panelGID))
+	require.NoError(t, tb.panelAction(playerPanelBtnNext, panelGID, panelUser))
 
 	assert.Equal(t, 1, tb.Player().QueueSnapshot().CurrentIndex, "next wraps past the last position")
 }
@@ -540,7 +540,7 @@ func TestPanelEventEnqueuesExactlyOneSoundSequence(t *testing.T) {
 func TestPanelActionErrorsAreReported(t *testing.T) {
 	tb := newPanelBot(t)
 
-	msg := tb.panelAction(playerPanelBtnPrev, panelGID).Error()
+	msg := tb.panelAction(playerPanelBtnPrev, panelGID, panelUser).Error()
 
 	assert.Contains(t, msg, "earlier track", "an empty lineup has nothing to go back to")
 }
@@ -548,7 +548,7 @@ func TestPanelActionErrorsAreReported(t *testing.T) {
 func TestPanelUnknownActionIsRejected(t *testing.T) {
 	tb := newPanelBot(t, panelTracks(2)...)
 
-	err := tb.panelAction("nonsense", panelGID)
+	err := tb.panelAction("nonsense", panelGID, panelUser)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown")
@@ -596,6 +596,18 @@ func TestPanelRejectsClicksWithNoVoiceConnection(t *testing.T) {
 	res := tb.resolvePanelClick(click)
 
 	assert.Equal(t, "i am not connected to a voice channel", res.Reject)
+}
+
+// The event button is the one action that may be pressed with no connection: it
+// joins the clicker's channel itself. A panel the bot has already left must therefore
+// still take the press.
+func TestPanelEventClickSurvivesNoVoiceConnection(t *testing.T) {
+	tb := newPanelBot(t)
+	click := tb.registerPanel(1, panelMessage)
+	click.Action = playerPanelBtnEvent
+	tb.SetPlayer(player.NewPlayer()) // a fresh player has no connection
+
+	assert.Empty(t, tb.resolvePanelClick(click).Reject)
 }
 
 // A replaced panel's buttons must stop working even if its message was never deleted.
