@@ -1,180 +1,53 @@
-# AGENTS.md - Developer Guide for dbot
+# AGENTS.md — dbot
 
-dbot is a Discord bot written in Go (v1.25) that plays music, manages playlists, and provides audio/video features. Uses SQLite, sqlc for DB code generation, and goose for migrations.
+Single-guild Discord bot (Go, disgo): music/sound playback, attachment backup with perceptual-hash dedupe, YouTube playlist snapshots, ffmpeg transcoding to fit Discord's upload limits.
 
-## Build Commands
+## Build & run
 
-```bash
-# Run with hot reload (uses .air.toml)
-air
+- Local dev: `air` (hot reload; watches `.env`). Env vars are read from the process environment via `fr-str/env`; there is no dotenv loading in code — export them or use docker.
+- CGO: `pkg/ffmpeg` links **libdave**. On Linux you must install it first (`make libdave`, Arch), then export `PKG_CONFIG_PATH` and `LD_LIBRARY_PATH` before any `CGO_ENABLED=1 go build`. Plain `go build ./...` (CGO off) fails to link — expected, not a bug.
+- Docker: `make build` (mod tidy + image build; the Dockerfile installs libdave itself), `make compose` / `compose-build`. Compose mounts `.prod.env`, volumes for `prod-data`/`prod-tmp`, and exposes **:58008** (API server).
 
-# Build manually (debug tags)
-go build -o ./tmp/main -tags 'debug' ./cmd/dbot/main.go
+## Tests & CI
 
-# Build for production
-go build -tags 'production' ./cmd/dbot/main.go
+- `go test ./...`; single package: `go test -run 'TestName' ./pkg/bot`.
+- Packages with tests: `bot`, `config`, `db/types`, `ffmpeg`, `job_runner`, `logger`, `player`, `ytdlp`. testify for assertions.
+- CI (self-hosted runner): build → vet → `go test ./... -timeout 60s`. Keep the suite fast and hang-free.
 
-# Tidy dependencies
-go mod tidy
-```
+## Database & codegen
 
-## Testing
+- Two SQLite DBs, both WAL + `synchronous=NORMAL` set at connect in `pkg/db`, `MaxOpenConns(1)`:
+  - **store** (`$DB_DIR`) — channel maps, sounds, playlists, queue state.
+  - **backup** (`$BACKUP_DIR`) — backup artifacts + pHash dedupe records.
+- sqlc generates both (two entries in `sqlc.yaml` → `pkg/store`, `pkg/backup`). Never hand-edit those packages; edit SQL in `db/migrations/`, `db/queries/*.sql`, or `db/backup/*.sql`, then `sqlc generate`.
+- goose via the go.mod tool directive (`go tool goose ...`). Migrations auto-run at startup (embedded migration sets for both DBs). Up-only by convention — no down sections.
+- Use `store.WithTx(ctx, fn)` for transactions; it must not do network work inside (single writer — a long txn blocks all other writes).
 
-```bash
-# Run all tests
-go test ./...
+## Architecture notes (not obvious from filenames)
 
-# Run tests in specific package with verbose output
-go test -v ./pkg/player
+- disgo dispatches events synchronously by default. `main.go` requires `disgobot.WithAsyncEventsEnabled()`; handlers that wait on gateway events deadlock without it.
+- Player: one loop goroutine (`soundLoop`) plus track playback via `playTrackFn`. Frame pacing uses a player-owned 20 ms clock. Do **not** hand the voice.Conn to disgo's `AudioSender`/`SetOpusFrameProvider`: music and sound share one Conn, and giving it away silently drops the other producer.
+- Job queue: `pkg/job_runner` is a single serial polling loop (sleeps 5 s when idle). Only one job type is registered today: `BackupJob` → `bot.backupVideoJob`.
+- ffmpeg outputs must fit Discord limits (~20 MiB video): `ToDiscordMP4`/`ToDiscordGIF` compute bitrate for that; `FFMPEG_HW_ACCEL` switches to QSV.
+- yt-dlp wrapper in `pkg/ytdlp`; main.go runs an hourly `yt-dlp -U` updater; `COOKIE_PATH` maps to `--cookies`.
+- API server on :58008 (`pkg/api`): `/api/dst/links`, `/api/init-scrape`.
 
-# Run specific test function (supports regex)
-go test -v -run TestPlaylist ./pkg/player
-go test -v -run "TestParseTime/success" ./pkg/ffmpeg
+## Logging & config
 
-# Run with race detector
-go test -race ./...
+- stdlib slog through the custom handler in `pkg/logger` (fr-str/log is gone — don't import it). `LOG_LEVEL`: default `debug`; use `sql` to log every query's SQL.
+- Error style: wrap with `%w`, prefix user-facing bot errors with `"dbot:"` (`bot.dbotErr`).
 
-# Run with coverage
-go test -cover ./...
-```
+| Env var | Default | Purpose |
+|---|---|---|
+| `TOKEN`, `GUILD_ID` | — (required) | Discord auth / guild |
+| `DB_DIR` | `$TMPDIR/dbot` | store DB dir |
+| `BACKUP_DIR` | `$TMPDIR/dbot/backup` | backup DB + artifacts |
+| `ENV` | — | dev/prod marker |
+| `LOG_LEVEL` | `debug` (`sql` for SQL) | log level |
+| `COOKIE_PATH` | — | yt-dlp cookies file |
+| `FFMPEG_HW_ACCEL` | off (bool) | enable QSV |
 
-## Code Generation
+## One-shot tools under cmd/
 
-```bash
-sqlc generate          # Generate database code
-goose ... up           # Run migrations
-```
-
-## Linting & Type Checking
-
-```bash
-go vet ./...           # Vet
-go fmt ./...           # Format
-```
-
-## Code Style
-
-### Imports (3 groups, blank line between)
-1. Standard library
-2. External packages (github.com, etc.)
-3. Internal packages (dbot/...)
-
-```go
-import (
-    "context"
-    "fmt"
-    "os"
-
-    "github.com/bwmarrin/discordgo"
-    "github.com/fr-str/log"
-
-    "dbot/pkg/config"
-    "dbot/pkg/store"
-)
-```
-
-### Naming Conventions
-- PascalCase for exported, camelCase for private
-- Use descriptive names; avoid abbreviations (except `Ctx` for `Context`)
-- Prefix interfaces with `er` (e.g., `Reader`, `Player`)
-- Test functions: `Test<Unit>_<scenario>`
-
-### Error Handling
-- Return errors, don't panic (except init failures)
-- Use custom error wrappers with context:
-```go
-func dbotErr(msg string, vars ...any) error {
-    return fmt.Errorf("dbot: "+msg+": ", vars...)
-}
-```
-- Use `errors.Wrap` or `%w` for chaining; log errors before returning
-
-### Types & Interfaces
-- Use concrete types; define interfaces only when needed
-- Embed types for composition (e.g., `*discordgo.Session` in `DBot`)
-- Use `context.Context` as first parameter for cancellable functions
-- Prefer values over pointers; use pointers only when needed
-
-### Testing
-- Prefer `github.com/stretchr/testify` for assertions:
-```go
-require.NoError(t, err)    // stops test on failure
-assert.Equal(t, expected, actual)  // continues on failure
-```
-- Test files: `*_test.go` in same package
-- Use table-driven tests with subtests:
-```go
-func TestParseTime(t *testing.T) {
-    t.Run("success", func(t *testing.T) {
-        t.Run("parses seconds", func(t *testing.T) { /* test */ })
-    })
-    t.Run("fail", func(t *testing.T) { /* test */ })
-}
-```
-
-## Database
-- Generated with sqlc - don't edit manually
-- SQL queries in `db/queries/*.sql`, migrations in `db/migrations/`
-- Use WAL mode + PRAGMA synchronous=NORMAL
-
-## Logging
-- Use `github.com/fr-str/log`: `log.Error`, `log.Warn`, `log.Info`, `log.Trace`
-- Add context: `log.Any`, `log.String`, etc.
-
-## Configuration
-- Use `github.com/fr-str/env`; define in `pkg/config/config.go`
-
-## Project Structure
-```
-cmd/           - Entry points
-pkg/           - Core packages
-  bot/         - Discord bot logic, handlers, commands
-  player/      - Music player
-  store/       - DB queries (generated)
-  ffmpeg/      - Audio/video processing
-db/            - SQL files and migrations
-```
-
-## Common Patterns
-
-### Start bot:
-```go
-config.Load()
-ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-defer cancel()
-db, err := db.ConnectStore(ctx, "./test.db", "")
-d := dbot.Start(ctx, dg, db)
-```
-
-### Add slash command (pkg/bot/commands.go):
-```go
-{
-    Name: "command-name",
-    Description: "Description",
-    Options: []*discordgo.ApplicationCommandOption{
-        { Type: discordgo.ApplicationCommandOptionString, Name: "option", Description: "..." },
-    },
-},
-```
-
-### FFmpeg clip:
-```go
-clip := ffmpeg.Clip{Start: 10 * time.Second, End: 30 * time.Second}
-f, err := ffmpeg.ToDiscordMP4(ctx, file, false, clip)
-```
-
-## Environment Variables
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `TOKEN` | Yes | Discord bot token |
-| `GUILD_ID` | Yes | Discord guild ID |
-| `ENV` | No | Environment (dev/prod) |
-| `DB_DIR` | No | Database directory |
-| `TMP_PATH` | No | Temporary file path |
-| `FFMPEG_HW_ACCEL` | No | FFmpeg hardware acceleration |
-
-## Important Notes
-- SQLite WAL mode - beware concurrent writes
-- Player has two loops (musicLoop, soundLoop) - understand before modifying
-- Voice connections need proper cleanup - always call Close()
-- Some packages have debug build tags - use `-tags 'debug'` locally
+- `cmd/importSounds` — seed script; `cmd/ffmpeg-debug` — standalone ffmpeg CLI against `pkg/ffmpeg`; `cmd/requeue-missing` — requeue missing cached videos (`-n` dry run).
+- `cmd/backfill-titles` and `cmd/img` are empty leftover dirs — no code there.
