@@ -13,3 +13,6 @@ cookies.txt
 .aider*
 data/audio-cache.db
 data
+prod-data
+prod-tmp
+prod-bak

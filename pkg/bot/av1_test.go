@@ -156,6 +156,36 @@ func TestBackupJobStoresAndThenDeletesTheDownload(t *testing.T) {
 		"the yt-dlp download must be removed once it has been stored")
 }
 
+// The job's temp dir is where everything it makes lands: the download, the edit.*
+// transcode output, a half-written .part. So the invariant is the whole dir, not one
+// path - a stub download writes a stray file into it the way convert() would.
+func TestBackupJobLeavesNothingInTheTempDir(t *testing.T) {
+	tb := newTestBot(t)
+	config.TMP_PATH = t.TempDir()
+
+	url := canonicalVideoURL("FlWII9xFabo")
+	download := filepath.Join(config.TMP_PATH, "FlWII9xFabo.webm")
+	require.NoError(t, os.WriteFile(download, []byte("media"), 0o644))
+
+	tb.DownloadVideoFunc = func(ctx context.Context, _ string) (ytdlp.VideoMeta, error) {
+		dir, _ := ctx.Value(config.DirKey).(string)
+		require.NotEmpty(t, dir, "the job must give the download a temp dir")
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "edit.FlWII9xFabo.mp4"), []byte("half an encode"), 0o644))
+		return ytdlp.VideoMeta{
+			ID: "FlWII9xFabo", Title: "It’s not just you",
+			VCodec: "av01.0.12M.08", Ext: "webm", Filepath: download,
+		}, nil
+	}
+
+	meta, err := backupJobMeta(testGID, videoBackupDir, url)
+	require.NoError(t, err)
+	require.NoError(t, tb.backupVideoJob(meta))
+
+	left, err := os.ReadDir(config.TMP_PATH)
+	require.NoError(t, err)
+	assert.Empty(t, left, "a backup job must leave the temp dir empty")
+}
+
 // mustMeta builds the exact job meta for a video, which is what the tool matches on.
 func mustMeta(t *testing.T, url string) string {
 	t.Helper()

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"dbot/pkg/config"
@@ -71,8 +70,15 @@ func (d *DBot) backupVideoJob(meta string) error {
 		return nil
 	}
 
-	dir := filepath.Join(config.TMP_PATH, "backup")
-	os.MkdirAll(dir, 0o755)
+	// The download and the edit.* transcode output both land in this dir (ytdlp runs
+	// with cmd.Dir from DirKey, convert() writes next to its input), so one RemoveAll
+	// leaves nothing behind whatever the job does next - including a download or an
+	// encode that dies halfway, which used to leave both files in a shared dir.
+	dir, err := os.MkdirTemp(config.TMP_PATH, "backup")
+	if err != nil {
+		return fmt.Errorf("backupFile: %w", err)
+	}
+	defer os.RemoveAll(dir)
 	ctx = context.WithValue(ctx, config.DirKey, dir)
 
 	f, err := d.fetchVideo(ctx, bf.OriginUrl)
