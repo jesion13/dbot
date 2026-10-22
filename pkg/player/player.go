@@ -837,7 +837,7 @@ func (p *Player) playSound(ctx context.Context, s SoundTrack) error {
 
 func (p *Player) trackSource(ctx context.Context, t Track) (io.ReadCloser, func(), error) {
 	if t.Filepath == "" {
-		dl := exec.CommandContext(ctx, "yt-dlp", "--no-playlist", "-f", "bestaudio", "-o", "-", t.URL)
+		dl := exec.CommandContext(ctx, "yt-dlp", "--no-playlist", "-f", "bestaudio", "-o", "-", "--", t.URL)
 		dl.Stderr = os.Stderr
 		pipe, err := dl.StdoutPipe()
 		if err != nil {
