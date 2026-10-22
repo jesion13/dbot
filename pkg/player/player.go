@@ -27,6 +27,11 @@ const (
 	// gateway froze Enqueue, TogglePause, QueueSnapshot and Close for the whole
 	// timeout on every speaking flip. A gateway round trip is tens of milliseconds.
 	speakingTimeout = 1 * time.Second
+	// writeTimeout bounds a UDP write, which also happens under the player lock. A
+	// stalled socket used to hold Enqueue, TogglePause and Close forever. One frame
+	// slot is enough: a healthy write takes microseconds, and a frame that times out
+	// is just dropped, which streamFrames already treats as a dropped datagram.
+	writeTimeout = 20 * time.Millisecond
 )
 
 var (
@@ -646,10 +651,15 @@ func (p *Player) frameEligibleLocked(gen uint64, ctx context.Context, music bool
 }
 
 // The only place a frame reaches the connection. Callers must hold mu and must have
-// checked eligibility.
+// checked eligibility. The write deadline is what keeps a stalled socket from holding
+// mu, and so the whole player, forever.
 func (p *Player) writeFrameLocked(conn voice.Conn, frame []byte) error {
 	p.setSpeakingLocked(conn, true)
-	_, err := conn.UDP().Write(frame)
+	udp := conn.UDP()
+	if err := udp.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return err
+	}
+	_, err := udp.Write(frame)
 	return err
 }
 

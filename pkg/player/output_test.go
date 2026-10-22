@@ -37,6 +37,9 @@ type fakeUDP struct {
 	closed *atomicBool
 	conn   *fakeConn
 	times  *[]time.Time
+	// deadlines records the write deadline the player set, so a test can check every
+	// frame write carries one. Guarded by mu.
+	deadlines *[]time.Time
 	// failNext makes the next Write return this error instead of recording, so a
 	// test can inject one bad datagram. Guarded by mu.
 	failNext bool
@@ -119,6 +122,7 @@ type fakeConn struct {
 	speakFailures int
 	udp           *fakeUDP
 	closed        atomicBool
+	deadlines     []time.Time
 
 	// blockWrite parks every write until the returned release func is called, so a
 	// test can hold a frame inside the sink while the player state changes.
@@ -130,7 +134,7 @@ type fakeConn struct {
 func newFakeConn(gid snowflake.ID) *fakeConn {
 	c := &fakeConn{gid: gid}
 	c.closed = atomicBool{mu: &c.mu}
-	c.udp = &fakeUDP{mu: &c.mu, rec: &c.writes, closed: &c.closed, conn: c, times: &c.frameTimes}
+	c.udp = &fakeUDP{mu: &c.mu, rec: &c.writes, closed: &c.closed, conn: c, times: &c.frameTimes, deadlines: &c.deadlines}
 	c.Conn = &connStub{udp: c.udp, c: c}
 	return c
 }
@@ -207,6 +211,24 @@ func (c *fakeConn) speakingAttempts() int {
 
 // close marks the connection unusable, so every later write is net.ErrClosed.
 func (c *fakeConn) close() { c.closed.Store(true) }
+
+// SetWriteDeadline is recorded, not enforced: the sink parks writes with blockWrite,
+// so a test can check the player sets a deadline on every write without emulating
+// socket timing.
+func (u *fakeUDP) SetWriteDeadline(t time.Time) error {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.deadlines != nil {
+		*u.deadlines = append(*u.deadlines, t)
+	}
+	return nil
+}
+
+func (c *fakeConn) deadlineCalls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.deadlines)
+}
 
 func (c *fakeConn) frames() []recordedWrite {
 	c.mu.Lock()
@@ -940,6 +962,18 @@ func TestPagesEndTheStream(t *testing.T) {
 	err := f.streamFrames(context.Background(), f.conn, f.currentGen(), true, pages([]byte("a"), []byte("b")))
 	assert.NoError(t, err)
 	assert.Len(t, f.conn.frames(), 2, "both frames went out before the end")
+}
+
+// TestFrameWritesCarryDeadline guards the only thing that keeps a stalled socket from
+// holding mu, and so Enqueue, TogglePause and Close, forever.
+func TestFrameWritesCarryDeadline(t *testing.T) {
+	f := newOutputFixture(t)
+	require.NoError(t, f.Enqueue(Track{Title: "a", URL: "u"}))
+	f.unpace()
+
+	require.NoError(t, f.streamFrames(context.Background(), f.conn, f.currentGen(), true, pages([]byte("a"), []byte("b"))))
+	require.Len(t, f.conn.frames(), 2)
+	require.Equal(t, 2, f.conn.deadlineCalls(), "every frame write sets a deadline")
 }
 
 func TestReaderErrorEndsTheStream(t *testing.T) {
