@@ -822,6 +822,10 @@ func (p *Player) playSound(ctx context.Context, s SoundTrack) error {
 			return fmt.Errorf("failed to download '%s': %w", s.URL, err)
 		}
 		filepath = fetched.Filepath
+		// yt-dlp writes the extracted audio into config.TMP_PATH and nothing else
+		// ever removes it, so a guild that plays sounds by URL fills /tmp/dbot.
+		// Deferred here so the file is still there for ffmpeg and goes when ffmpeg is done.
+		defer os.Remove(filepath)
 	}
 
 	cmd := exec.CommandContext(ctx, "ffmpeg", append([]string{"-hide_banner", "-loglevel", "error", "-i", filepath}, opusArgs()...)...)
