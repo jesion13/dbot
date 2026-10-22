@@ -296,7 +296,9 @@ func parseSpecialLinks(rawUrl string) (string, error) {
 		return rawUrl, fmt.Errorf("Error making web (HEAD) request url(%s): %w", rawUrl, err)
 	}
 	defer resp.Body.Close()
-	contentType := resp.Header["Content-Type"][0]
+	// Get returns "" when the header is absent (a 204 or a bodiless redirect has
+	// none), which the old resp.Header["Content-Type"][0] turned into a panic
+	contentType := resp.Header.Get("Content-Type")
 	if !strings.Contains(contentType, "text/html") {
 		return rawUrl, nil
 	}
