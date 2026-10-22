@@ -23,8 +23,10 @@ const (
 	// errBuf keeps an undrained ErrChan from blocking playback.
 	errBuf = 16
 	// speakingTimeout bounds the gateway call that updates discord's speaking flag,
-	// which happens while the player lock is held.
-	speakingTimeout = 5 * time.Second
+	// which happens while the player lock is held, so it has to stay short: a slow
+	// gateway froze Enqueue, TogglePause, QueueSnapshot and Close for the whole
+	// timeout on every speaking flip. A gateway round trip is tens of milliseconds.
+	speakingTimeout = 1 * time.Second
 )
 
 var (
