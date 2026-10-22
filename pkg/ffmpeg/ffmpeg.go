@@ -307,7 +307,7 @@ func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error)
 	cmd := exec.CommandContext(ctx, "ffmpeg")
 	cmd.Args = append(cmd.Args, "-hide_banner")
 	if clip.Start > 0 {
-		cmd.Args = append(cmd.Args, "-ss", clip.Start.String())
+		cmd.Args = append(cmd.Args, "-ss", formatDurationForFFmpeg(clip.Start))
 	}
 	cmd.Args = append(
 		cmd.Args,
@@ -409,7 +409,7 @@ func convert(ctx context.Context, file string, clip Clip, encoder, quality, pres
 		"-init_hw_device", "qsv=hw",
 		"-filter_hw_device", "hw")
 	if clip.Start > 0 {
-		cmd.Args = append(cmd.Args, "-ss", clip.Start.String())
+		cmd.Args = append(cmd.Args, "-ss", formatDurationForFFmpeg(clip.Start))
 	}
 	cmd.Args = append(cmd.Args, "-i", file)
 	if clip.End > 0 {

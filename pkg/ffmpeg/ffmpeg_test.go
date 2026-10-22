@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"os/exec"
 	"testing"
 	"time"
 
@@ -244,4 +245,25 @@ func TestSelectDiscordVideoSettings(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 426, settings.Width)
 	assert.Equal(t, 240, settings.Height)
+}
+
+// the -ss value handed to ffmpeg must be ffmpeg's time format, not Go's Duration text.
+// ffmpeg refuses "1m30s", which is what time.Duration.String() gives, so the GIF and AV1
+// cut paths (which used to pass clip.Start.String()) failed every clip.
+func TestSeekValueIsAcceptedByFFmpeg(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+
+	for _, d := range []time.Duration{time.Second, 90 * time.Second, 2*time.Hour + 5*time.Minute} {
+		v := formatDurationForFFmpeg(d)
+		out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+			"-ss", v, "-f", "lavfi", "-i", "nullsrc=size=2x2:duration=1", "-t", "0.1", "-f", "null", "-").CombinedOutput()
+		require.NoError(t, err, "-ss %s: %s", v, out)
+	}
+
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-ss", (90 * time.Second).String(), "-f", "lavfi", "-i", "nullsrc=size=2x2:duration=1", "-f", "null", "-").CombinedOutput()
+	require.Error(t, err)
+	assert.Contains(t, string(out), "Invalid duration for option ss")
 }
