@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"dbot/pkg/config"
 	"dbot/pkg/ffmpeg"
 
 	"github.com/stretchr/testify/assert"
@@ -159,7 +160,8 @@ func TestCropPageShowsTheFrameBeingCropped(t *testing.T) {
 	// the trim, the audio and the format are all picked here now, the command says none of them
 	assert.Contains(t, body, `id="mute" type="checkbox"`)
 	assert.Contains(t, body, `id="format"`)
-	assert.Contains(t, body, `<option value="gif">GIF</option>`)
+	// the label is the page's own copy, the value is what the bot encodes
+	assert.Contains(t, body, `<option value="gif">`)
 	assert.Contains(t, body, `mute: $("mute").checked`)
 
 	// the crop preview is painted from the frame being played, so a smaller frame is
@@ -272,5 +274,37 @@ func TestCropRoutesAnswerGoneForAnExpiredLink(t *testing.T) {
 
 		require.Equal(t, http.StatusNotFound, rec.Code, tc.target)
 		assert.Contains(t, rec.Body.String(), cropGoneMessage)
+	}
+}
+
+// the link is the only thing a browser has to be able to open, so PUBLIC_URL is checked
+// where the link is built; url.JoinPath drops the path of a base with no host
+func TestEditLinkComesFromPublicURL(t *testing.T) {
+	old := config.PUBLIC_URL
+	defer func() { config.PUBLIC_URL = old }()
+
+	info := ffmpeg.Streams{Streams: []ffmpeg.Stream{{CodecType: "video", Width: 640, Height: 360}}}
+
+	for _, tc := range []struct{ pub, want string }{
+		{"http://host:58008", "http://host:58008/edit/"},
+		{"http://host/", "http://host/edit/"},
+		{"https://ex.com/dbot", "https://ex.com/dbot/edit/"},
+	} {
+		config.PUBLIC_URL = tc.pub
+
+		s, link, err := (&DBot{}).newCropSession(cropSessionParams{Dir: t.TempDir(), File: "v.mp4", Info: info})
+		require.NoError(t, err)
+		s.timer.Stop()
+		defer func() { delete(cropSess, s.token) }()
+
+		assert.True(t, strings.HasPrefix(link, tc.want), "%s gave %s", tc.pub, link)
+		assert.Contains(t, link, s.token)
+	}
+
+	for _, pub := range []string{"", "localhost:58008", "dupa"} {
+		config.PUBLIC_URL = pub
+
+		_, _, err := (&DBot{}).newCropSession(cropSessionParams{Dir: t.TempDir(), File: "v.mp4", Info: info})
+		assert.Error(t, err, pub)
 	}
 }

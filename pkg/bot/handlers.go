@@ -438,7 +438,7 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 	hasHEVCVideo := ffmpeg.HasHEVCVideo(videoInfo)
 
 	if edit {
-		_, token, err := d.newCropSession(cropSessionParams{
+		_, link, err := d.newCropSession(cropSessionParams{
 			Dir:    cropDir,
 			File:   info.Filepath,
 			Info:   videoInfo,
@@ -448,7 +448,6 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 			return err
 		}
 		cropOwned = true
-		link := cropLink(token)
 
 		// the interaction token dies in about 15 minutes and the encode happens when the
 		// user submits, so this is the last thing sent through the interaction

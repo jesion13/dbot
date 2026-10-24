@@ -11,9 +11,9 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -104,13 +104,6 @@ type cropSessionParams struct {
 	Target transcodeTarget
 }
 
-// CropLink is what the user gets: a URL that only this process knows, valid until the
-// session expires. PUBLIC_URL has to be reachable from the user's browser, which is
-// whoever exposes :58008, not the bot.
-func cropLink(token string) string {
-	return strings.TrimRight(config.PUBLIC_URL, "/") + "/edit/" + token
-}
-
 func cropToken() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -120,12 +113,22 @@ func cropToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// newCropSession hands out the edit link: a URL only this process knows, valid until
+// the session expires. PUBLIC_URL has to be reachable from the user's browser, which is
+// whoever exposes the API server, not the bot.
 func (d *DBot) newCropSession(p cropSessionParams) (*cropSession, string, error) {
 	if p.Dir == "" {
 		return nil, "", errors.New("a crop session needs a directory of its own")
 	}
 	if config.PUBLIC_URL == "" {
 		return nil, "", errors.New("PUBLIC_URL is not set, so /to-mp4 edit:true has no link to hand out")
+	}
+	// url needs a scheme + host to join onto: "localhost:58008" parses as scheme
+	// "localhost" with no host, and JoinPath then drops the path, so the link handed
+	// out would never reach the page
+	base, err := url.Parse(config.PUBLIC_URL)
+	if base.Host == "" {
+		return nil, "", fmt.Errorf("PUBLIC_URL is invalid, dumb programer")
 	}
 
 	width, height, err := ffmpeg.DisplaySizeOf(p.Info)
@@ -137,6 +140,7 @@ func (d *DBot) newCropSession(p cropSessionParams) (*cropSession, string, error)
 	if err != nil {
 		return nil, "", err
 	}
+	link := base.JoinPath("edit", token).String()
 
 	s := &cropSession{
 		token:    token,
@@ -160,7 +164,7 @@ func (d *DBot) newCropSession(p cropSessionParams) (*cropSession, string, error)
 	cropSess[token] = s
 	cropMu.Unlock()
 
-	return s, token, nil
+	return s, link, nil
 }
 
 func (d *DBot) lookupCrop(token string) (*cropSession, bool) {
