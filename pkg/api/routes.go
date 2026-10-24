@@ -90,8 +90,8 @@ func StartServer(d *dbot.DBot) {
 
 	go func() {
 		// the port is what PUBLIC_URL has to point at, so say the one that is bound
-		slog.Info("starting server", slog.String("addr", ":5999"))
-		err := http.ListenAndServe(":5999", nil)
+		slog.Info("starting server", slog.String("addr", ":58008"))
+		err := http.ListenAndServe(":58008", nil)
 		if err != nil {
 			slog.Error(err.Error())
 		}
