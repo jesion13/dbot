@@ -35,7 +35,7 @@ type videoSettings struct {
 }
 
 // the returned file is closed when the context is canceled
-func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.File, error) {
+func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip, crop Crop) (*os.File, error) {
 	tmpDir, ok := ctx.Value(config.DirKey).(string)
 	if !ok || len(tmpDir) == 0 {
 		return nil, errors.New("nie dałeś temp dira debilu")
@@ -62,6 +62,15 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.F
 	if err != nil {
 		return nil, err
 	}
+	if crop, err = normalizeCrop(crop, video); err != nil {
+		return nil, err
+	}
+	if !crop.Empty() {
+		// cropping changes both the pixel count and the aspect ratio: the bitrate
+		// ladder and the scale target have to be computed from the cropped frame,
+		// or the result is stretched
+		video.Width, video.Height = crop.W, crop.H
+	}
 
 	videoBudgetBPS, err := discordVideoBudgetBPS(duration, mute)
 	if err != nil {
@@ -86,8 +95,8 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.F
 		base = append(base, "-t", fmt.Sprintf("%.2f", clip.End.Seconds()-clip.Start.Seconds()))
 	}
 	base = append(base, "-c:v", "libx264")
-	if settings.Scale {
-		base = append(base, "-vf", fmt.Sprintf("scale=%d:%d", settings.Width, settings.Height))
+	if filters := videoFilters(crop, settings); len(filters) > 0 {
+		base = append(base, "-vf", strings.Join(filters, ","))
 	}
 	base = append(
 		base,
@@ -159,11 +168,64 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip) (*os.F
 func firstVideoStream(info Streams) (Stream, error) {
 	for _, stream := range info.Streams {
 		if stream.CodecType == "video" && stream.Width > 0 && stream.Height > 0 {
+			stream.Width, stream.Height = stream.DisplaySize()
 			return stream, nil
 		}
 	}
 
 	return Stream{}, errors.New("input does not contain a video stream with valid dimensions")
+}
+
+// Crop is a rectangle of the picture, in displayed (rotation applied) pixel
+// coordinates, which is both what a user picks on screen and what ffmpeg's crop filter
+// cuts.
+type Crop struct {
+	X, Y, W, H int
+}
+
+func (c Crop) Empty() bool { return c.W <= 0 || c.H <= 0 }
+
+func (c Crop) filter() string {
+	return fmt.Sprintf("crop=%d:%d:%d:%d", c.W, c.H, c.X, c.Y)
+}
+
+// crop filters go before scale, so scale gets the cropped aspect ratio
+func videoFilters(crop Crop, settings videoSettings) []string {
+	var filters []string
+	if !crop.Empty() {
+		filters = append(filters, crop.filter())
+	}
+	if settings.Scale {
+		filters = append(filters, fmt.Sprintf("scale=%d:%d", settings.Width, settings.Height))
+	}
+
+	return filters
+}
+
+// normalizeCrop drops a rectangle that covers everything, and rounds the size down to
+// even: libx264 with yuv420p refuses odd dimensions, and finding that out after a
+// multi-minute first pass is a waste of a machine.
+func normalizeCrop(crop Crop, video Stream) (Crop, error) {
+	if crop.Empty() {
+		return Crop{}, nil
+	}
+
+	if crop.X < 0 || crop.Y < 0 {
+		return Crop{}, fmt.Errorf("crop offset must not be negative: %v", crop)
+	}
+	crop.W, crop.H = crop.W&^1, crop.H&^1
+	if crop.W < 2 || crop.H < 2 {
+		return Crop{}, fmt.Errorf("crop area is too small: %v", crop)
+	}
+	if crop.X+crop.W > video.Width || crop.Y+crop.H > video.Height {
+		return Crop{}, fmt.Errorf("crop area %vx%v+%v+%v does not fit %vx%v",
+			crop.W, crop.H, crop.X, crop.Y, video.Width, video.Height)
+	}
+	if crop.X == 0 && crop.Y == 0 && crop.W == video.Width && crop.H == video.Height {
+		return Crop{}, nil
+	}
+
+	return crop, nil
 }
 
 func discordVideoBudgetBPS(duration float64, mute bool) (float64, error) {
@@ -282,7 +344,7 @@ func ParseTime(s string) (time.Duration, error) {
 }
 
 // the returned file is closed when the context is canceled
-func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error) {
+func ToDiscordGIF(ctx context.Context, file string, clip Clip, crop Crop) (*os.File, error) {
 	tmpDir, ok := ctx.Value(config.DirKey).(string)
 	if !ok || len(tmpDir) == 0 {
 		return nil, errors.New("nie dałeś temp dira debilu")
@@ -291,6 +353,13 @@ func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error)
 	gifPath := filepath.Join(tmpDir, "discord.dupa.webp")
 	info, err := Probe(file)
 	if err != nil {
+		return nil, err
+	}
+	video, err := firstVideoStream(info)
+	if err != nil {
+		return nil, err
+	}
+	if crop, err = normalizeCrop(crop, video); err != nil {
 		return nil, err
 	}
 
@@ -309,12 +378,16 @@ func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error)
 	if clip.Start > 0 {
 		cmd.Args = append(cmd.Args, "-ss", formatDurationForFFmpeg(clip.Start))
 	}
+	gifFilters := []string{"fps=24", "scale=480:-1:flags=lanczos"}
+	if !crop.Empty() {
+		gifFilters = append([]string{crop.filter()}, gifFilters...)
+	}
 	cmd.Args = append(
 		cmd.Args,
 		"-i", file,
 		"-t", fmt.Sprintf("%.2f", duration),
 		"-vcodec", "libwebp",
-		"-filter:v", "fps=24,scale=480:-1:flags=lanczos",
+		"-filter:v", strings.Join(gifFilters, ","),
 		"-lossless", "0", // Use lossy compression for video source efficiency
 		"-q:v", "75", // Quality factor (75-80 is the sweet spot for webp)
 		"-loop", "0", // Infinite loop play state
@@ -334,6 +407,9 @@ func ToDiscordGIF(ctx context.Context, file string, clip Clip) (*os.File, error)
 		return nil, err
 	}
 	stat, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat gif: %w", err)
+	}
 	slog.Debug("convertToDiscordGIF",
 		slog.String("gifPath", gifPath),
 		slog.String("file", f.Name()), slog.Int64("size", stat.Size()))

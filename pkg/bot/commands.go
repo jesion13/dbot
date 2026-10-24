@@ -101,30 +101,8 @@ var cmds = []discord.ApplicationCommandCreate{
 				Description: "file",
 			},
 			discord.ApplicationCommandOptionBool{
-				Name:        "mute",
-				Description: "Remove audio from the video",
-			},
-			discord.ApplicationCommandOptionString{
-				Name:        "format",
-				Description: "Output format",
-				Choices: []discord.ApplicationCommandOptionChoiceString{
-					{
-						Name:  "MP4",
-						Value: "mp4",
-					},
-					{
-						Name:  "GIF",
-						Value: "gif",
-					},
-				},
-			},
-			discord.ApplicationCommandOptionString{
-				Name:        "start",
-				Description: "Clip start time (e.g., 1:30 or 90)",
-			},
-			discord.ApplicationCommandOptionString{
-				Name:        "end",
-				Description: "Clip end time (e.g., 2:00 or 120)",
+				Name:        "edit",
+				Description: "Pick the area, the trim, the audio and the format in a browser page first",
 			},
 		},
 	},

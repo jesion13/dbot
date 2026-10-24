@@ -33,6 +33,12 @@ var (
 	FFMPEG_HW_ACCEL bool
 
 	BACKUP_DIR string
+
+	// where the bot's :58008 server is reachable from a user's browser, used to build the
+	// /to-mp4 crop links. No default: a wrong host means a link nobody can open,
+	// so it is better to refuse than to guess.
+	// For local testing: PUBLIC_URL=http://localhost:58008
+	PUBLIC_URL string
 )
 
 func Load() {
@@ -46,6 +52,7 @@ func Load() {
 	COOKIE_PATH = env.Get("COOKIE_PATH", "")
 	FFMPEG_HW_ACCEL = env.Get("FFMPEG_HW_ACCEL", false)
 	BACKUP_DIR = env.Get("BACKUP_DIR", filepath.Join(os.TempDir(), "dbot", "backup"))
+	PUBLIC_URL = env.Get("PUBLIC_URL", "")
 
 	fmt.Println("ENV =", ENV)
 	fmt.Println("LOG_LEVEL =", LOG_LEVEL)
@@ -55,6 +62,7 @@ func Load() {
 	fmt.Println("COOKIE_PATH =", COOKIE_PATH)
 	fmt.Println("FFMPEG_HW_ACCEL =", FFMPEG_HW_ACCEL)
 	fmt.Println("BACKUP_DIR =", BACKUP_DIR)
+	fmt.Println("PUBLIC_URL =", PUBLIC_URL)
 
 	dirs := []string{
 		BACKUP_DIR,

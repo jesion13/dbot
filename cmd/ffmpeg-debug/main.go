@@ -39,7 +39,7 @@ func main() {
 	output, err := ffmpeg.ToDiscordMP4(ctx, *inputPath, *mute, ffmpeg.Clip{
 		Start: *start,
 		End:   *end,
-	})
+	}, ffmpeg.Crop{})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "convert video: %v\n", err)
 		os.Exit(1)

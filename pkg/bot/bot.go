@@ -287,6 +287,7 @@ func Start(ctx context.Context, client *bot.Client, dbstore *db.Store) *DBot {
 	}
 
 	go d.reportPlayerErrors(ctx)
+	cleanupCropDirs()
 	d.bindPanelStore(ctx)
 	go d.cleanupOrphanPanelOnce(ctx)
 	go d.ensurePanel(ctx)

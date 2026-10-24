@@ -89,6 +89,13 @@ type (
 		Duration       MaybeTimeDuration `json:"duration"`
 		BitRate        StringInt         `json:"bit_rate"`
 
+		// a phone video shot in portrait is stored landscape and carries a rotation
+		// matrix; width/height stay the coded (unrotated) size
+		SideData []struct {
+			SideDataType string `json:"side_data_type"`
+			Rotation     int    `json:"rotation"`
+		} `json:"side_data_list,omitempty"`
+
 		SampleFmt      string `json:"sample_fmt,omitempty"`
 		SampleRate     string `json:"sample_rate,omitempty"`
 		Channels       int    `json:"channels,omitempty"`
@@ -119,6 +126,33 @@ func Probe(path string) (Streams, error) {
 	}
 
 	return meta, nil
+}
+
+// DisplaySize is the picture size the way it is shown, rotation applied. ffmpeg runs
+// -vf crop/scale on the already rotated frame (verified on ffmpeg 9: a crop rect that
+// only fits the rotated frame succeeds), so anything that picks coordinates or a scale
+// target has to use these dims instead of the coded Width/Height.
+func (s Stream) DisplaySize() (int, int) {
+	for _, sd := range s.SideData {
+		if sd.SideDataType != "Display Matrix" {
+			continue
+		}
+		if r := ((sd.Rotation % 180) + 180) % 180; r != 0 {
+			return s.Height, s.Width
+		}
+	}
+
+	return s.Width, s.Height
+}
+
+// DisplaySizeOf is the displayed size of the picture a user picks a rect on.
+func DisplaySizeOf(info Streams) (int, int, error) {
+	stream, err := firstVideoStream(info)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return stream.Width, stream.Height, nil
 }
 
 func HasHEVCVideo(info Streams) bool {

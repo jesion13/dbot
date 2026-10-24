@@ -82,9 +82,16 @@ func StartServer(d *dbot.DBot) {
 		// 	slog.Info("DONE")
 		// }()
 	})
+	// edit links: whoever exposes :58008 is who the user's browser talks to
+	http.HandleFunc("GET /edit/{token}", d.CropPage)
+	http.HandleFunc("GET /edit/{token}/video", d.CropVideo)
+	http.HandleFunc("GET /edit/{token}/status", d.CropStatus)
+	http.HandleFunc("POST /edit/{token}", d.CropSubmit)
+
 	go func() {
-		slog.Info("starting server: http://localhost:58008")
-		err := http.ListenAndServe(":58008", nil)
+		// the port is what PUBLIC_URL has to point at, so say the one that is bound
+		slog.Info("starting server", slog.String("addr", ":5999"))
+		err := http.ListenAndServe(":5999", nil)
 		if err != nil {
 			slog.Error(err.Error())
 		}
