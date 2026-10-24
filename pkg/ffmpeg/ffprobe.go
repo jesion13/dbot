@@ -95,6 +95,10 @@ type (
 			SideDataType string `json:"side_data_type"`
 			Rotation     int    `json:"rotation"`
 		} `json:"side_data_list,omitempty"`
+		// the same rotation as a tag, the way ffmpeg <=5 and phone recorders write it
+		Tags struct {
+			Rotation StringInt `json:"rotate,omitempty"`
+		} `json:"tags"`
 
 		SampleFmt      string `json:"sample_fmt,omitempty"`
 		SampleRate     string `json:"sample_rate,omitempty"`
@@ -134,12 +138,18 @@ func Probe(path string) (Streams, error) {
 // target has to use these dims instead of the coded Width/Height.
 func (s Stream) DisplaySize() (int, int) {
 	for _, sd := range s.SideData {
-		if sd.SideDataType != "Display Matrix" {
-			continue
+		if sd.SideDataType == "Display Matrix" {
+			if r := ((sd.Rotation % 180) + 180) % 180; r != 0 {
+				return s.Height, s.Width
+			}
+			return s.Width, s.Height
 		}
-		if r := ((sd.Rotation % 180) + 180) % 180; r != 0 {
-			return s.Height, s.Width
-		}
+	}
+	// a file that carries rotation only as the rotate tag has no matrix to read; ffmpeg
+	// applies the tag when it decodes, so the rect the user drew lands rotated if the
+	// page and the crop use the coded dims
+	if r := ((int(s.Tags.Rotation) % 180) + 180) % 180; r != 0 {
+		return s.Height, s.Width
 	}
 
 	return s.Width, s.Height

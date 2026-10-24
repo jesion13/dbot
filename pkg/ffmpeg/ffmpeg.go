@@ -86,6 +86,10 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip, crop C
 		slog.Int("height", settings.Height))
 	base := []string{
 		"-hide_banner",
+		// the edit page lets the user submit again, and the previous encode left its
+		// output in this same dir; without -y ffmpeg prints "Not overwriting - exiting"
+		// and exits 0, so the bot posts the crop from the submit before this one
+		"-y",
 	}
 	if clip.Start > 0 {
 		base = append(base, "-ss", formatDurationForFFmpeg(clip.Start))
@@ -109,7 +113,7 @@ func ToDiscordMP4(ctx context.Context, file string, mute bool, clip Clip, crop C
 	cmd := exec.CommandContext(ctx, "ffmpeg")
 	cmd.Args = append(cmd.Args, base...)
 	cmd.Args = append(cmd.Args,
-		"-an", "-pass", "1", "-f", "mp4", "-y", "/dev/null")
+		"-an", "-pass", "1", "-f", "mp4", "/dev/null")
 
 	slog.Info("convertToDiscordMP4 first pass", slog.String("cmd", cmd.String()))
 	err = runCmd(cmd)

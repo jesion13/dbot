@@ -111,6 +111,12 @@ func TestCropClip(t *testing.T) {
 		require.ErrorContains(t, err, "after trim start")
 	})
 
+	t.Run("a short clip late in the video is refused", func(t *testing.T) {
+		// the guard is clip length: ffmpeg gets -ss 30 -t 0.01, which encodes no frames
+		_, err := cropClip(cropRequest{Start: 30, End: 30.01}, time.Minute)
+		require.ErrorContains(t, err, "trim is too short")
+	})
+
 	t.Run("a trim past the end of the video is refused", func(t *testing.T) {
 		_, err := cropClip(cropRequest{Start: 0, End: 70}, time.Minute)
 		require.ErrorContains(t, err, "past the end")

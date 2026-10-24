@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"encoding/json"
 	"os/exec"
 	"testing"
 	"time"
@@ -177,6 +178,30 @@ func TestGifSettings(t *testing.T) {
 			assert.Equal(t, time.Duration(0), settings.Clip.Start)
 		})
 	})
+}
+
+// rotation is the page's coordinate frame: the browser shows the rotated picture and
+// ffmpeg crops the rotated frame, so the rect is drawn in rotated pixels. Two sources
+// carry it: the Display Matrix side data (ffmpeg 6+) and the rotate tag (ffmpeg <=5,
+// phone recorders); a matrix wins when both are present.
+func TestDisplaySize(t *testing.T) {
+	for _, tc := range []struct {
+		name, json string
+		w, h       int
+	}{
+		{"no rotation", `{"width":320,"height":240}`, 320, 240},
+		{"matrix 90", `{"width":320,"height":240,"side_data_list":[{"side_data_type":"Display Matrix","rotation":90}]}`, 240, 320},
+		{"matrix -90", `{"width":320,"height":240,"side_data_list":[{"side_data_type":"Display Matrix","rotation":-90}]}`, 240, 320},
+		{"matrix 180 is not a quarter turn", `{"width":320,"height":240,"side_data_list":[{"side_data_type":"Display Matrix","rotation":180}]}`, 320, 240},
+		{"rotate tag 270", `{"width":320,"height":240,"tags":{"rotate":"270"}}`, 240, 320},
+		{"matrix beats the tag", `{"width":320,"height":240,"tags":{"rotate":"90"},"side_data_list":[{"side_data_type":"Display Matrix","rotation":180}]}`, 320, 240},
+	} {
+		var s Stream
+		require.NoError(t, json.Unmarshal([]byte(tc.json), &s), tc.name)
+		w, h := s.DisplaySize()
+		assert.Equal(t, tc.w, w, tc.name)
+		assert.Equal(t, tc.h, h, tc.name)
+	}
 }
 
 func TestFirstVideoStream(t *testing.T) {

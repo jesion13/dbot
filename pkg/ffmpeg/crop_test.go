@@ -77,3 +77,45 @@ func TestToDiscordMP4Crops(t *testing.T) {
 	assert.Equal(t, 200, stream.Width)
 	assert.Equal(t, 100, stream.Height)
 }
+
+// the edit page re-submits into the same directory, where the previous encode already
+// wrote its file; ffmpeg has to replace it, not refuse the existing output and exit 0
+// with the old crop still on disk (which is what the bot then posts)
+func TestToDiscordMP4ReplacesThePreviousCrop(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+
+	dir := t.TempDir()
+	input := filepath.Join(dir, "in.mp4")
+	out, err := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=size=320x240:rate=15:duration=2",
+		"-pix_fmt", "yuv420p", input).CombinedOutput()
+	require.NoError(t, err, "make a test video: %s", out)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	ctx = context.WithValue(ctx, config.DirKey, dir)
+
+	clip := Clip{End: time.Second}
+
+	first, err := ToDiscordMP4(ctx, input, true, clip, Crop{X: 20, Y: 10, W: 200, H: 100})
+	require.NoError(t, err)
+	first.Close()
+
+	// a full-frame second submit: the old file is a 200x100 crop, so the un-cropped
+	// size is what proves the second encode replaced it
+	second, err := ToDiscordMP4(ctx, input, true, clip, Crop{})
+	require.NoError(t, err)
+	defer second.Close()
+
+	info, err := Probe(second.Name())
+	require.NoError(t, err)
+	stream, err := firstVideoStream(info)
+	require.NoError(t, err)
+	assert.Equal(t, 320, stream.Width)
+	assert.Equal(t, 240, stream.Height)
+}

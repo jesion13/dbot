@@ -94,7 +94,6 @@ type cropSession struct {
 	mu      sync.Mutex
 	state   cropState
 	lastErr string
-	submits int
 }
 
 type cropSessionParams struct {
@@ -281,7 +280,9 @@ func cropClip(req cropRequest, duration time.Duration) (ffmpeg.Clip, error) {
 	if clip.End <= clip.Start {
 		return ffmpeg.Clip{}, fmt.Errorf("trim end must be after trim start")
 	}
-	if clip.End < 500*time.Millisecond {
+	// the guard is the length of the clip: ffmpeg gets -ss start -t (end-start), and a
+	// clip under half a second encodes no frames, which ffmpeg reports as a dead output
+	if clip.End-clip.Start < 500*time.Millisecond {
 		return ffmpeg.Clip{}, fmt.Errorf("trim is too short")
 	}
 	// the browser and ffprobe round the duration differently
@@ -332,7 +333,6 @@ func (d *DBot) claimCrop(token string, req cropRequest) (*cropSession, ffmpeg.Cr
 	// the encode owns the directory now: a 2-pass encode of a long trim outlives the
 	// session timer, and losing the download mid-encode would be worse than a late link
 	s.timer.Stop()
-	s.submits++
 
 	return s, rect, clip, nil
 }
