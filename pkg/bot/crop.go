@@ -278,6 +278,11 @@ func cropClip(req cropRequest, duration time.Duration) (ffmpeg.Clip, error) {
 	if !trimSeconds(req.Start) || !trimSeconds(req.End) {
 		return ffmpeg.Clip{}, fmt.Errorf("trim must be a number of seconds between 0 and a day")
 	}
+	// with no known length a start point is a guess: the gif path would get a negative
+	// -t (duration 0 minus the start) and post a frameless webp
+	if duration <= 0 && req.Start > 0 {
+		return ffmpeg.Clip{}, fmt.Errorf("video has no known duration, trim refused")
+	}
 
 	clip := ffmpeg.Clip{Start: time.Duration(req.Start * float64(time.Second))}
 	if req.End <= 0 {

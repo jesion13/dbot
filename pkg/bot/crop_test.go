@@ -131,6 +131,18 @@ func TestCropClip(t *testing.T) {
 		_, err := cropClip(cropRequest{Start: -5, End: 20}, time.Minute)
 		require.Error(t, err)
 	})
+
+	t.Run("a start is refused when the video has no known duration", func(t *testing.T) {
+		// ToDiscordGIF would get -t (0 - start), a negative duration
+		_, err := cropClip(cropRequest{Start: 10, End: 0}, 0)
+		require.ErrorContains(t, err, "no known duration")
+	})
+
+	t.Run("no trim is fine with no known duration", func(t *testing.T) {
+		clip, err := cropClip(cropRequest{Start: 0, End: 0}, 0)
+		require.NoError(t, err)
+		assert.Equal(t, ffmpeg.Clip{}, clip)
+	})
 }
 
 func newTestCropSession() (*DBot, *cropSession, func()) {
