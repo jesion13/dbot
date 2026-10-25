@@ -42,10 +42,11 @@ RUN --mount=type=cache,target=/var/cache/pacman/pkg/ \
     wget \
     python3
 
-# isntall ytdlp from GH
-RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp && \
-    chmod +x ./yt-dlp && \
-    mv ./yt-dlp /usr/bin
+# install ytdlp from GH — standalone build bundles curl_cffi, needed for
+# --impersonate firefox (reddit TLS fingerprint check); plain asset omits it
+RUN wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux && \
+    chmod +x ./yt-dlp_linux && \
+    mv ./yt-dlp_linux /usr/bin/yt-dlp
 
 WORKDIR /dbot
 COPY --from=build /bin/dbot .

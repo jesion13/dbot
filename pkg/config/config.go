@@ -28,7 +28,9 @@ var (
 
 	TMP_PATH string
 
-	COOKIE_PATH string
+	YT_COOKIE_PATH string
+
+	REDDIT_COOKIE_PATH string
 
 	FFMPEG_HW_ACCEL bool
 
@@ -49,7 +51,8 @@ func Load() {
 	TOKEN = env.Get("TOKEN", "")
 	GUILD_ID = env.Get("GUILD_ID", "")
 	TMP_PATH = env.Get("TMP_PATH", filepath.Join(os.TempDir(), "dbot"))
-	COOKIE_PATH = env.Get("COOKIE_PATH", "")
+	YT_COOKIE_PATH = env.Get("YT_COOKIE_PATH", "")
+	REDDIT_COOKIE_PATH = env.Get("REDDIT_COOKIE_PATH", "")
 	FFMPEG_HW_ACCEL = env.Get("FFMPEG_HW_ACCEL", false)
 	BACKUP_DIR = env.Get("BACKUP_DIR", filepath.Join(os.TempDir(), "dbot", "backup"))
 	PUBLIC_URL = env.Get("PUBLIC_URL", "")
@@ -59,7 +62,8 @@ func Load() {
 	fmt.Println("DB_DIR =", DB_DIR)
 	fmt.Println("GUILD_ID =", GUILD_ID)
 	fmt.Println("TMP_PATH =", TMP_PATH)
-	fmt.Println("COOKIE_PATH =", COOKIE_PATH)
+	fmt.Println("YT_COOKIE_PATH =", YT_COOKIE_PATH)
+	fmt.Println("REDDIT_COOKIE_PATH =", REDDIT_COOKIE_PATH)
 	fmt.Println("FFMPEG_HW_ACCEL =", FFMPEG_HW_ACCEL)
 	fmt.Println("BACKUP_DIR =", BACKUP_DIR)
 	fmt.Println("PUBLIC_URL =", PUBLIC_URL)

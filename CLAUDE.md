@@ -93,7 +93,7 @@ flattening struct-valued attrs into dotted `Key.Field=value` lines (recursing in
 `ToDiscordMP4`/`ToDiscordGIF` compute a target bitrate from `DiscordMaxFileSizeBytes` (20 MiB) and clip duration, re-encoding only when needed (oversized, muted, clipped, or HEVC — `HasHEVCVideo` via `ffprobe`). `FFMPEG_HW_ACCEL` env var toggles Intel QSV hardware acceleration (`h264_qsv`, seen as `-init_hw_device qsv=hw`).
 
 ### yt-dlp (`pkg/ytdlp`)
-Wraps the `yt-dlp` binary (`DownloadAudio`, `DownloadVideo`, `DownloadVideoSmall`, `PlaylistInfo`). `StartUpdater` (called once from `main.go`) runs `yt-dlp -U` on an hourly ticker for the life of the process. Uses `COOKIE_PATH` (`--cookies`) when set, for age/login-gated videos.
+Wraps the `yt-dlp` binary (`DownloadAudio`, `DownloadVideo`, `DownloadVideoSmall`, `PlaylistInfo`). `StartUpdater` (called once from `main.go`) runs `yt-dlp -U` on an hourly ticker for the life of the process. Per-domain cookies when set: `YT_COOKIE_PATH` for youtube urls, `REDDIT_COOKIE_PATH` for reddit.com; other urls get no cookies. Reddit also gets `--impersonate firefox` — Reddit rejects raw TLS fingerprints ("Your IP address is unable to access the Reddit API"); needs the curl_cffi-bundled standalone build.
 
 ### minio — legacy only
 `pkg/minio` and `cmd/migrage_from_minio` exist solely to migrate sound files *away* from a MinIO bucket into local backup storage (migration `008_remove_minio_dep.sql`). Not used by the running bot; the `MINIO_*` config vars are declared in `pkg/config` but never populated by `Load()` — only set by that one-off command before running.
@@ -113,7 +113,8 @@ Wraps the `yt-dlp` binary (`DownloadAudio`, `DownloadVideo`, `DownloadVideoSmall
 | `DB_DIR` | `data` | main store DB directory, created if missing |
 | `BACKUP_DIR` | `$TMPDIR/dbot/backup` | backup DB + attachment files, created if missing |
 | `TMP_PATH` | `$TMPDIR/dbot` | audio cache DB, scratch files, per-command tmp dirs |
-| `COOKIE_PATH` | `""` | passed to yt-dlp `--cookies` when set |
+| `YT_COOKIE_PATH` | `""` | passed to yt-dlp `--cookies` for YouTube urls |
+| `REDDIT_COOKIE_PATH` | `""` | passed to yt-dlp `--cookies` for reddit.com |
 | `FFMPEG_HW_ACCEL` | `false` | enables QSV hardware transcode |
 
 `docker-compose.yml` mounts `./.prod.env` as `/dbot/.env` and `./prod-data`/`./prod-tmp` as the real data dirs; `.env`/`.prod.env` are both gitignored.

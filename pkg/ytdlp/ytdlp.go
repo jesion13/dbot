@@ -57,7 +57,6 @@ func init() {
 		<-config.Ctx.Done()
 		audioDownloadCMD = []string{
 			"--no-simulate",
-			"--cookies", filepath.Join(must(os.Getwd()), "prod-data", config.COOKIE_PATH),
 			"--print", printAfterMove,
 			"-x",
 			"--no-playlist",
@@ -67,7 +66,6 @@ func init() {
 		}
 		videoDownloadCMD = []string{
 			"--no-simulate",
-			"--cookies", filepath.Join(must(os.Getwd()), "prod-data", config.COOKIE_PATH),
 			"--print", printAfterMove,
 			"--no-playlist",
 			"-f",
@@ -76,7 +74,6 @@ func init() {
 		}
 		videoDownloadSmallCMD = []string{
 			"--no-simulate",
-			"--cookies", filepath.Join(must(os.Getwd()), "prod-data", config.COOKIE_PATH),
 			"--print", printAfterMove,
 			"--no-playlist",
 			"-f",
@@ -91,7 +88,6 @@ func init() {
 			"--no-playlist",
 			"--no-colors",
 			"--print", "%(title)s",
-			"--cookies", filepath.Join(must(os.Getwd()), "prod-data", config.COOKIE_PATH),
 		}
 
 		playlistInfoCMD = []string{
@@ -99,7 +95,6 @@ func init() {
 			"--flat-playlist",
 			"--dump-single-json",
 			"--no-colors",
-			"--cookies", filepath.Join(must(os.Getwd()), "prod-data", config.COOKIE_PATH),
 		}
 	}()
 }
@@ -118,13 +113,33 @@ type VideoMeta struct {
 	OriginalURL string `json:"original_url"`
 }
 
+func injectCookies(url string, args []string) []string {
+	var p string
+	var extra []string
+	switch {
+	case strings.Contains(url, "reddit.com"):
+		p = config.REDDIT_COOKIE_PATH
+		// reddit 403s raw TLS fingerprints ("IP unable to access the API");
+		// impersonate the browser the cookies come from — upstream thread
+		// says the Chrome target gets a captcha, Firefox doesn't
+		extra = []string{"--impersonate", "firefox"}
+	case strings.Contains(url, "youtu"):
+		p = config.YT_COOKIE_PATH
+	}
+	if p == "" {
+		return args
+	}
+	args = append(args, "--cookies", filepath.Join(must(os.Getwd()), "prod-data", p))
+	return append(args, extra...)
+}
+
 func (YTDLP) DownloadAudio(link string) (VideoMeta, error) {
 	link, err := parseSpecialLinks(link)
 	if err != nil {
 		return VideoMeta{}, errors.Join(errors.New("Special Links Parser"), err)
 	}
 
-	cmd := exec.Command(ytdlp, append(audioDownloadCMD, "--", link)...)
+	cmd := exec.Command(ytdlp, append(injectCookies(link,audioDownloadCMD), "--", link)...)
 	cmd.Dir = config.TMP_PATH
 
 	stdout := &bytes.Buffer{}
@@ -159,7 +174,7 @@ func (YTDLP) DownloadVideo(ctx context.Context, link string) (VideoMeta, error) 
 		return VideoMeta{}, errors.Join(errors.New("Special Links Parser"), err)
 	}
 
-	cmd := exec.Command(ytdlp, append(videoDownloadCMD, "--", link)...)
+	cmd := exec.Command(ytdlp, append(injectCookies(link,videoDownloadCMD), "--", link)...)
 	cmd.Dir = string(tmpDir)
 
 	stdout := &bytes.Buffer{}
@@ -194,7 +209,7 @@ func (YTDLP) DownloadVideoSmall(ctx context.Context, link string) (VideoMeta, er
 		return VideoMeta{}, errors.Join(errors.New("Special Links Parser"), err)
 	}
 
-	cmd := exec.Command(ytdlp, append(videoDownloadSmallCMD, "--", link)...)
+	cmd := exec.Command(ytdlp, append(injectCookies(link,videoDownloadSmallCMD), "--", link)...)
 	cmd.Dir = string(tmpDir)
 
 	stdout := &bytes.Buffer{}
@@ -227,7 +242,7 @@ func (YTDLP) Title(ctx context.Context, link string) (string, error) {
 		return "", errors.Join(errors.New("Special Links Parser"), err)
 	}
 
-	cmd := exec.CommandContext(ctx, ytdlp, append(titleCMD, "--", link)...)
+	cmd := exec.CommandContext(ctx, ytdlp, append(injectCookies(link,titleCMD), "--", link)...)
 	cmd.Dir = config.TMP_PATH
 
 	stdout := &bytes.Buffer{}
@@ -259,7 +274,7 @@ type PlaylistMeta struct {
 }
 
 func (YTDLP) PlaylistInfo(link string) (PlaylistMeta, error) {
-	cmd := exec.Command(ytdlp, append(playlistInfoCMD, "--", link)...)
+	cmd := exec.Command(ytdlp, append(injectCookies(link,playlistInfoCMD), "--", link)...)
 	cmd.Dir = config.TMP_PATH
 
 	stdout := &bytes.Buffer{}

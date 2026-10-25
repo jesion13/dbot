@@ -29,7 +29,7 @@ Single-guild Discord bot (Go, disgo): music/sound playback, attachment backup wi
 - Player: one loop goroutine (`soundLoop`) plus track playback via `playTrackFn`. Frame pacing uses a player-owned 20 ms clock. Do **not** hand the voice.Conn to disgo's `AudioSender`/`SetOpusFrameProvider`: music and sound share one Conn, and giving it away silently drops the other producer.
 - Job queue: `pkg/job_runner` is a single serial polling loop (sleeps 5 s when idle). Only one job type is registered today: `BackupJob` → `bot.backupVideoJob`.
 - ffmpeg outputs must fit Discord limits (~20 MiB video): `ToDiscordMP4`/`ToDiscordGIF` compute bitrate for that; `FFMPEG_HW_ACCEL` switches to QSV.
-- yt-dlp wrapper in `pkg/ytdlp`; main.go runs an hourly `yt-dlp -U` updater; `COOKIE_PATH` maps to `--cookies`.
+- yt-dlp wrapper in `pkg/ytdlp`; main.go runs an hourly `yt-dlp -U` updater; `YT_COOKIE_PATH`/`REDDIT_COOKIE_PATH` map to yt-dlp `--cookies` per URL domain; reddit requests also get `--impersonate firefox` (Reddit 403s raw TLS fingerprints). Dockerfile installs the `yt-dlp_linux` standalone build — the plain zipimport asset has no curl_cffi, so `--impersonate` fails.
 - API server on :58008 (`pkg/api`): `/api/dst/links`, `/api/init-scrape`.
 
 ## Logging & config
@@ -44,7 +44,8 @@ Single-guild Discord bot (Go, disgo): music/sound playback, attachment backup wi
 | `BACKUP_DIR` | `$TMPDIR/dbot/backup` | backup DB + artifacts |
 | `ENV` | — | dev/prod marker |
 | `LOG_LEVEL` | `debug` (`sql` for SQL) | log level |
-| `COOKIE_PATH` | — | yt-dlp cookies file |
+| `YT_COOKIE_PATH` | — | yt-dlp cookies for YouTube urls |
+| `REDDIT_COOKIE_PATH` | — | yt-dlp cookies for reddit.com |
 | `FFMPEG_HW_ACCEL` | off (bool) | enable QSV |
 
 ## One-shot tools under cmd/
