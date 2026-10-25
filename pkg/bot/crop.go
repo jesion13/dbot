@@ -39,7 +39,7 @@ const (
 	cropEncodeTimeout = time.Hour
 	// each session holds a download, and each encode is a serial CPU hog
 	CropMaxSessions = 4
-	cropMaxStreams  = 2
+	cropMaxEncodes  = 2
 	cropMaxBody     = 1 << 10
 	minCropPx       = 16
 	// the page reports fractions, so the axes cannot be mixed up by a window resize
@@ -55,7 +55,7 @@ var (
 	// neither of these lives on DBot
 	cropMu      sync.Mutex
 	cropSess    = map[string]*cropSession{}
-	cropEncodeC = make(chan struct{}, cropMaxStreams)
+	cropEncodeC = make(chan struct{}, cropMaxEncodes)
 
 	cropPageTmpl = template.Must(template.ParseFS(cropWeb, "web/crop.html.tmpl"))
 )
