@@ -84,25 +84,31 @@ func TestFormatDurationForFFmpeg(t *testing.T) {
 		t.Run("parses seconds only", func(t *testing.T) {
 			d := 90 * time.Second
 			s := formatDurationForFFmpeg(d)
-			assert.Equal(t, "1:30", s)
+			assert.Equal(t, "90.00", s)
 		})
 
 		t.Run("parses minutes and seconds", func(t *testing.T) {
 			d := 3*time.Minute + 35*time.Second
 			s := formatDurationForFFmpeg(d)
-			assert.Equal(t, "3:35", s)
+			assert.Equal(t, "215.00", s)
 		})
 
 		t.Run("parses hours", func(t *testing.T) {
 			d := 1*time.Hour + 30*time.Minute + 45*time.Second
 			s := formatDurationForFFmpeg(d)
-			assert.Equal(t, "1:30:45", s)
+			assert.Equal(t, "5445.00", s)
+		})
+
+		t.Run("parses sub-seconds", func(t *testing.T) {
+			d := 1250 * time.Millisecond
+			s := formatDurationForFFmpeg(d)
+			assert.Equal(t, "1.25", s)
 		})
 
 		t.Run("parses zero", func(t *testing.T) {
 			d := time.Duration(0)
 			s := formatDurationForFFmpeg(d)
-			assert.Equal(t, "0:00", s)
+			assert.Equal(t, "0.00", s)
 		})
 	})
 }

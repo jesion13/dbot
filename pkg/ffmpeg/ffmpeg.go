@@ -304,16 +304,10 @@ type GifSettings struct {
 	Clip   Clip
 }
 
+// plain fractional seconds: ffmpeg accepts them, and the crop page sends 0.1s
+// precision, so integer seconds would shift the cut start by up to a second
 func formatDurationForFFmpeg(d time.Duration) string {
-	totalSecs := int(d.Seconds())
-	hours := totalSecs / 3600
-	minutes := (totalSecs % 3600) / 60
-	seconds := totalSecs % 60
-
-	if hours > 0 {
-		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
-	}
-	return fmt.Sprintf("%d:%02d", minutes, seconds)
+	return fmt.Sprintf("%.2f", d.Seconds())
 }
 
 // Accepts "90", "90s", "2m30s", "1:30" and "1:30:45".
