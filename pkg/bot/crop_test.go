@@ -148,6 +148,25 @@ func newTestCropSession() (*DBot, *cropSession, func()) {
 }
 
 // the page is the only thing the user sees, so its numbers must be the bot's numbers
+func TestCropCapCountsLiveSessions(t *testing.T) {
+	tokens := []string{"t0", "t1", "t2", "t3"}
+	for _, tok := range tokens {
+		cropSess[tok] = &cropSession{token: tok, timer: time.AfterFunc(time.Hour, func() {})}
+	}
+	defer func() {
+		for _, tok := range tokens {
+			if s, ok := cropSess[tok]; ok {
+				s.timer.Stop()
+				delete(cropSess, tok)
+			}
+		}
+	}()
+
+	assert.True(t, cropCapReached(), "the cap must bite at max sessions")
+	delete(cropSess, "t0")
+	assert.False(t, cropCapReached(), "an expired session frees its slot")
+}
+
 func TestCropPageShowsTheFrameBeingCropped(t *testing.T) {
 	d, _, done := newTestCropSession()
 	defer done()

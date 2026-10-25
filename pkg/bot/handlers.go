@@ -393,6 +393,9 @@ func (d *DBot) handleToMP4(ctx context.Context, e *events.ApplicationCommandInte
 		if config.PUBLIC_URL == "" {
 			return errors.New("PUBLIC_URL is not set, so /to-mp4 edit:true has no link to hand out")
 		}
+		if cropCapReached() {
+			return fmt.Errorf("too many edits in flight (max %d), try again in a bit", CropMaxSessions)
+		}
 
 		dir, err := os.MkdirTemp(config.TMP_PATH, "crop")
 		if err != nil {

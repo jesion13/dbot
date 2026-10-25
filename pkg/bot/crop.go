@@ -166,6 +166,14 @@ func (d *DBot) newCropSession(p cropSessionParams) (*cropSession, string, error)
 	return s, link, nil
 }
 
+// cropCapReached gates before the download: a command over the cap must not pay
+// for a whole video download and then be rejected in newCropSession
+func cropCapReached() bool {
+	cropMu.Lock()
+	defer cropMu.Unlock()
+	return len(cropSess) >= CropMaxSessions
+}
+
 func (d *DBot) lookupCrop(token string) (*cropSession, bool) {
 	cropMu.Lock()
 	defer cropMu.Unlock()
