@@ -382,7 +382,9 @@ func ToDiscordGIF(ctx context.Context, file string, clip Clip, crop Crop) (*os.F
 	if clip.Start > 0 {
 		cmd.Args = append(cmd.Args, "-ss", formatDurationForFFmpeg(clip.Start))
 	}
-	gifFilters := []string{"fps=24", "scale=480:-1:flags=lanczos"}
+	// force_original_aspect_ratio keeps the box capped: a skinny crop (minCropPx 16)
+	// must not scale to 480x32400 and blow the size check
+	gifFilters := []string{"fps=24", "scale=480:480:force_original_aspect_ratio=decrease:flags=lanczos"}
 	if !crop.Empty() {
 		gifFilters = append([]string{crop.filter()}, gifFilters...)
 	}
