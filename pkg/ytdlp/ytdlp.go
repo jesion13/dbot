@@ -113,19 +113,30 @@ type VideoMeta struct {
 	OriginalURL string `json:"original_url"`
 }
 
-func injectCookies(url string, args []string) []string {
-	var p string
-	var extra []string
-	switch {
-	case strings.Contains(url, "reddit.com"):
-		p = config.REDDIT_COOKIE_PATH
+// Cookies are domain-scoped, so match the parsed hostname, not a url substring:
+// youtu.be.attacker.example must get no YouTube cookies.
+func cookiesFor(link string) (string, []string) {
+	u, err := url.Parse(link)
+	if err != nil {
+		return "", nil
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "youtu.be" || strings.HasSuffix(host, ".youtu.be") ||
+		host == "youtube.com" || strings.HasSuffix(host, ".youtube.com") ||
+		host == "youtube-nocookie.com" || strings.HasSuffix(host, ".youtube-nocookie.com") {
+		return config.YT_COOKIE_PATH, nil
+	}
+	if host == "reddit.com" || strings.HasSuffix(host, ".reddit.com") {
 		// reddit 403s raw TLS fingerprints ("IP unable to access the API");
 		// impersonate the browser the cookies come from — upstream thread
 		// says the Chrome target gets a captcha, Firefox doesn't
-		extra = []string{"--impersonate", "firefox"}
-	case strings.Contains(url, "youtu"):
-		p = config.YT_COOKIE_PATH
+		return config.REDDIT_COOKIE_PATH, []string{"--impersonate", "firefox"}
 	}
+	return "", nil
+}
+
+func injectCookies(url string, args []string) []string {
+	p, extra := cookiesFor(url)
 	if p == "" {
 		return args
 	}

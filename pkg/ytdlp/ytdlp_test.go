@@ -62,6 +62,14 @@ func TestInjectCookies(t *testing.T) {
 		assert.Equal(t, []string{"--no-simulate"}, out)
 	})
 
+	t.Run("look-alike host gets no cookies", func(t *testing.T) {
+		config.YT_COOKIE_PATH, config.REDDIT_COOKIE_PATH = "./yt.txt", "./reddit.txt"
+		out := injectCookies("https://youtu.be.attacker.example/x", tmpl)
+		assert.Equal(t, []string{"--no-simulate"}, out)
+		out = injectCookies("https://reddit.com.attacker.example/x", tmpl)
+		assert.Equal(t, []string{"--no-simulate"}, out)
+	})
+
 	t.Run("template slice is not mutated", func(t *testing.T) {
 		config.YT_COOKIE_PATH, config.REDDIT_COOKIE_PATH = "./yt.txt", "./reddit.txt"
 		injectCookies("https://youtube.com/x", tmpl)
