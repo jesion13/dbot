@@ -242,10 +242,12 @@ func soundTrack(s store.Sound) player.SoundTrack {
 func (d *DBot) onUserVoiceStateChange(e *events.GuildVoiceStateUpdate) {
 	conn, botChanID := d.Player().Conn()
 	slog.Debug("onUserVoiceStateChange", slog.Bool("connected", conn != nil), slog.Any("botChanID", botChanID))
-	if conn == nil {
+	gID := e.VoiceState.GuildID
+	if conn == nil || !d.voiceConnLive(gID, conn) {
+		// no live session: leaving an empty channel is moot, and replacing the player
+		// here would throw away the lineup the reconnect resumes
 		return
 	}
-	gID := e.VoiceState.GuildID
 	var botChanUserCount int
 	for vs := range d.Client.Caches.VoiceStates(gID) {
 		if member, ok := d.Client.Caches.Member(gID, vs.UserID); ok && member.User.Bot {

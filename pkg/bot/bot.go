@@ -351,9 +351,16 @@ var ErrVoiceDisabled = errors.New("voice disabled")
 
 func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 	// return ErrVoiceDisabled
-	// skip if we are already connected
-	if conn, _ := d.Player().Conn(); conn != nil {
-		return nil
+	// skip if we are already connected - but only while disgo still holds the
+	// connection: after a voice gateway failure it destroys the Conn (closes the
+	// socket, removes it from its manager) and the player is left holding a dead
+	// pointer. Treating that as connected is what zombied the bot forever.
+	if conn, chanID := d.Player().Conn(); conn != nil {
+		if d.voiceConnLive(gID, conn) {
+			return nil
+		}
+		slog.Warn("voice connection lost, rejoining", slog.Any("channel_id", chanID))
+		return d.rejoinVoice(gID, chanID)
 	}
 
 	vs, err := d.getUserVC(gID, uID)
@@ -375,6 +382,34 @@ func (d *DBot) connectVoice(gID, uID snowflake.ID) error {
 	slog.Debug("[dupa]", slog.Any("channel.ChannelID", *vs.ChannelID))
 
 	return nil
+}
+
+// voiceConnLive reports whether disgo still holds the player's connection. After a
+// voice gateway failure it destroys the Conn - closes the socket, drops it from its
+// manager - and the player is left holding a dead pointer; treating that as connected
+// is what zombied the bot forever.
+func (d *DBot) voiceConnLive(gID snowflake.ID, conn voice.Conn) bool {
+	// shortcut: test bots run without a client; the real one always has a VoiceManager
+	if d.Client == nil || d.Client.VoiceManager == nil {
+		return true
+	}
+	return d.Client.VoiceManager.GetConn(gID) == conn
+}
+
+// rejoinVoice replaces a connection disgo destroyed on its own. The dead one is
+// released, never closed: closing it sends a leave update that would eject the fresh
+// join. SetVC inside AttachVoiceConnection then resumes whatever lineup the lost
+// connection left on hold.
+func (d *DBot) rejoinVoice(gID, chanID snowflake.ID) error {
+	d.Player().ClearVC()
+
+	vc := d.Client.VoiceManager.CreateConn(gID)
+	openCtx, cancel := context.WithTimeout(d.Ctx, 10*time.Second)
+	defer cancel()
+	if err := vc.Open(openCtx, chanID, false, false); err != nil {
+		return fmt.Errorf("failed to rejoin VC: %w", err)
+	}
+	return d.AttachVoiceConnection(vc, chanID)
 }
 
 const (

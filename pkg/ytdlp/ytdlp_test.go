@@ -1,11 +1,13 @@
 package ytdlp
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"dbot/pkg/config"
+	"dbot/pkg/ffmpeg"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,4 +78,14 @@ func TestInjectCookies(t *testing.T) {
 		injectCookies("https://reddit.com/x", tmpl)
 		assert.Equal(t, []string{"--no-simulate"}, tmpl)
 	})
+}
+
+// The small download is uploaded to Discord as it came, so its size budget must come
+// from the same constant ffmpeg re-encoding uses, not a hand-written number.
+func TestSmallFormatTracksDiscordLimit(t *testing.T) {
+	assert.Equal(t, ffmpeg.DiscordMaxFileSizeBytes>>20, maxMiB)
+	assert.Equal(t, maxMiB, videoMiB+audioMiB, "video+audio budget must equal the limit")
+	assert.Equal(t,
+		fmt.Sprintf("bv*[filesize<%dM]+ba[filesize<%dM]/b[filesize<%dM]/bv*[height<=720]+ba/b[height<=720]/b", videoMiB, audioMiB, maxMiB),
+		smallFormat)
 }

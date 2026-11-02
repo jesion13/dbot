@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"dbot/pkg/config"
+	"dbot/pkg/ffmpeg"
 
 	"golang.org/x/net/html"
 )
@@ -52,6 +53,17 @@ const outputTemplate = "%(id)s.%(ext)s"
 // the extra resolution of a non-AV1 alternative is never seen.
 const formatBest = "bv*[vcodec=av01]+ba/bv*+ba/b"
 
+// format string, built from Discord's upload limit (the same constant ffmpeg uses when
+// it re-encodes): video gets 4/5 of the budget, audio the rest — the old 8M+2M split
+// scaled to the limit. yt-dlp's "M" is MiB. The height fallbacks stay, because
+// filesize filters skip formats with no known size.
+var (
+	maxMiB      = ffmpeg.DiscordMaxFileSizeBytes >> 20
+	videoMiB    = maxMiB * 4 / 5
+	audioMiB    = maxMiB - videoMiB
+	smallFormat = fmt.Sprintf("bv*[filesize<%dM]+ba[filesize<%dM]/b[filesize<%dM]/bv*[height<=720]+ba/b[height<=720]/b", videoMiB, audioMiB, maxMiB)
+)
+
 func init() {
 	go func() {
 		<-config.Ctx.Done()
@@ -77,7 +89,7 @@ func init() {
 			"--print", printAfterMove,
 			"--no-playlist",
 			"-f",
-			`bv*[filesize<8M]+ba[filesize<2M]/b[filesize<10M]/bv*[height<=720]+ba/b[height<=720]/b`,
+			smallFormat,
 			"--format-sort", "res,fps~30,codec:av01",
 			"-o", outputTemplate,
 		}

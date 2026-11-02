@@ -211,6 +211,20 @@ func TestCropPageShowsTheFrameBeingCropped(t *testing.T) {
 	// every corner is the one being dragged, the opposite one holds still
 	assert.Contains(t, body, "function cornerAt(p)")
 	assert.Contains(t, body, `mode = "resize"`)
+
+	// the typed trim bounds jump the playhead, so a chosen time can be watched;
+	// the long names are tooltips and labels, the glyphs are the literal emoji
+	// U+23EE (start) and U+23ED (end)
+	for _, b := range []struct{ btn, field, tip, glyph string }{
+		{"goStart", "start", "Skocz do ustawionego początku", "⏮"},
+		{"goEnd", "end", "Skocz do ustawionego końca", "⏭"},
+	} {
+		assert.Contains(t, body, `id="`+b.btn+`"`)
+		assert.Contains(t, body, `title="`+b.tip+`"`)
+		assert.Contains(t, body, `aria-label="`+b.tip+`">`+b.glyph+`</button>`)
+		assert.Contains(t, body, `$("`+b.btn+`").onclick = () => jump("`+b.field+`")`)
+	}
+	assert.Contains(t, body, `v.currentTime = Math.min(t, v.duration)`)
 }
 
 // the page, not the command, picks the format and whether to keep the audio

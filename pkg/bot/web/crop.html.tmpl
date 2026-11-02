@@ -229,6 +229,12 @@ button:disabled {
   color: var(--text);
 }
 
+/* emoji-only jump buttons: the glyph is the label, so centre it */
+#goStart, #goEnd {
+  justify-content: center;
+  font-size: 15px;
+}
+
 input[type="range"] {
   flex: 1;
   min-width: 0;
@@ -463,6 +469,26 @@ input[type="checkbox"] {
     font-size: 10px;
   }
 }
+.time-button-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.time-button-row > button:first-child {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.time-button-row .jump-button {
+  flex: 0 0 38px;
+  width: 38px;
+  padding: 5px;
+  justify-content: center;
+  font-size: 15px;
+}
 </style>
 
 <div class="app">
@@ -532,11 +558,23 @@ input[type="checkbox"] {
           </div>
         </div>
 
-        <div class="button-stack">
-          <button id="setStart"><span>↳</span> Ustaw początek z odtwarzania</button>
-          <button id="setEnd"><span>↳</span> Ustaw koniec z odtwarzania</button>
-        </div>
+<div class="button-stack">
+  <div class="time-button-row">
+    <button id="setStart"><span>↳</span> Ustaw początek</button>
+    <button id="goStart" class="jump-button"
+            title="Skocz do ustawionego początku"
+            aria-label="Skocz do ustawionego początku">⏮</button>
+  </div>
+
+  <div class="time-button-row">
+    <button id="setEnd"><span>↳</span> Ustaw koniec</button>
+    <button id="goEnd" class="jump-button"
+            title="Skocz do ustawionego końca"
+            aria-label="Skocz do ustawionego końca">⏭</button>
+  </div>
+</div>
       </section>
+
 
       <section class="section">
         <h3 class="section-title">02 / Kadrowanie</h3>
@@ -690,6 +728,12 @@ $("format").onchange = () => { $("mute").disabled = $("format").value == "gif"; 
 
 $("setStart").onclick = () => { $("start").value = v.currentTime.toFixed(2); };
 $("setEnd").onclick = () => { $("end").value = v.currentTime.toFixed(2); };
+
+// jump the playhead to the typed time so the frame at a bound can be checked;
+// values past the end are clamped, empty ones do nothing
+const jump = (id) => { const t = parseFloat($(id).value); if (isFinite(t)) v.currentTime = Math.min(t, v.duration); };
+$("goStart").onclick = () => jump("start");
+$("goEnd").onclick = () => jump("end");
 
 function fmt(s) {
   if (!isFinite(s)) return "0:00";

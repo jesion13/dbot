@@ -251,8 +251,10 @@ func (p *Player) Close() error {
 // Setting the same connection again is a no-op, so a retry is harmless. A different
 // one is refused with ErrConnectionTaken: a worker captures the connection when its
 // track starts, so moving the field would leave playback writing to a connection this
-// player no longer owns. Reconnecting goes through the bot's lifecycle, which closes
-// the old player and its connection first.
+// player no longer owns. Reconnecting an old player goes through the bot's lifecycle,
+// which closes the old player and its connection first; a player whose connection died
+// outside the player (see ClearVC) takes the replacement here and resumes the entry
+// the lost connection left on hold.
 func (p *Player) SetVC(conn voice.Conn, vcid snowflake.ID) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -267,7 +269,23 @@ func (p *Player) SetVC(conn voice.Conn, vcid snowflake.ID) error {
 	}
 	p.conn = conn
 	p.vcid = vcid
+	if p.cursor >= 0 && p.cursor < len(p.lineup) {
+		p.startLocked()
+	}
 	return nil
+}
+
+// ClearVC releases a connection that died outside the player: when disgo cannot reopen
+// its voice gateway (session invalidated, close 4006) it closes the socket, leaves the
+// channel and drops the Conn from its manager without telling the player. The dead
+// pointer must never be Closed here - closing sends a null-channel update that ejects
+// the fresh join - it is simply let go. Playback is holding on the entry that died
+// (see runTrack) and resumes when the replacement connection arrives through SetVC.
+func (p *Player) ClearVC() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.conn = nil
+	p.vcid = 0
 }
 
 // A non-nil conn is only guaranteed to stay open while the player is not closing.
@@ -533,6 +551,12 @@ func (p *Player) runTrack(gen uint64, ctx context.Context, t Track) {
 	}
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, errOutputLost) {
 		p.reportErr(p.playerErr("failed to play '%s'", t.Title, err))
+	}
+	if errors.Is(err, errConnGone) {
+		// The connection died, not the track. Advancing would churn the rest of the
+		// lineup through the same dead socket, one fresh ffmpeg per entry. Hold the
+		// cursor: a replacement connection arriving through SetVC replays this entry.
+		return
 	}
 	p.advanceLocked()
 }
