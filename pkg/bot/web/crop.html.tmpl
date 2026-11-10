@@ -278,7 +278,7 @@ input[type="range"] {
   gap: 8px;
 }
 
-input[type="number"],
+input.time-input,
 select {
   width: 100%;
   min-width: 0;
@@ -547,14 +547,14 @@ input[type="checkbox"] {
 
         <div class="time-grid">
           <div>
-            <label class="field-label" for="start">Początek (s)</label>
-            <input id="start" type="number" step="0.1" min="0"
-                   placeholder="0.0">
+            <label class="field-label" for="start">Początek (h:m:s)</label>
+            <input id="start" type="text" class="time-input" autocomplete="off"
+                   spellcheck="false" placeholder="0:00:00">
           </div>
           <div>
-            <label class="field-label" for="end">Koniec (s)</label>
-            <input id="end" type="number" step="0.1" min="0"
-                   placeholder="0.0">
+            <label class="field-label" for="end">Koniec (h:m:s)</label>
+            <input id="end" type="text" class="time-input" autocomplete="off"
+                   spellcheck="false" placeholder="0:00:00">
           </div>
         </div>
 
@@ -718,35 +718,73 @@ v.addEventListener("timeupdate", () => {
   $("time").textContent = fmt(v.currentTime) + " / " + fmt(v.duration);
 });
 v.addEventListener("loadedmetadata", () => {
-  if (!$("end").value || $("end").value == 0) $("end").value = v.duration.toFixed(2);
-  $("end").max = v.duration.toFixed(2);
-  $("start").max = v.duration.toFixed(2);
+  if (!$("end").value) $("end").value = formatHMS(v.duration);
 });
 
 // a gif carries no audio, so muting it is not a thing to ask for
 $("format").onchange = () => { $("mute").disabled = $("format").value == "gif"; };
 
-$("setStart").onclick = () => { $("start").value = v.currentTime.toFixed(2); };
-$("setEnd").onclick = () => { $("end").value = v.currentTime.toFixed(2); };
+$("setStart").onclick = () => { $("start").value = formatHMS(v.currentTime); };
+$("setEnd").onclick = () => { $("end").value = formatHMS(v.currentTime); };
+
+// the boxes show h:mm:ss, the server still gets seconds. bare seconds and mm:ss
+// are accepted too, so an old habit does not turn into a refused trim
+function parseHMS(s) {
+  s = String(s).trim();
+  if (!s) return NaN;
+  const parts = s.split(":");
+  if (parts.length > 3) return NaN;
+  let sec = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const last = i === parts.length - 1;
+    if (!(last ? /^\d+(\.\d+)?$/ : /^\d+$/).test(parts[i])) return NaN;
+    sec = sec * 60 + parseFloat(parts[i]);
+  }
+  return isFinite(sec) ? sec : NaN;
+}
+
+// whole seconds, with a fractional part only when there is one, so the set
+// buttons keep the sub-second precision the old number inputs had
+function formatHMS(s) {
+  if (!isFinite(s) || s < 0) return "0:00:00";
+  const total = Math.round(s * 100) / 100;
+  const h = Math.floor(total / 3600);
+  const m = Math.floor(total % 3600 / 60);
+  const sec = total % 60;
+  const whole = Math.floor(sec);
+  const frac = Math.round((sec - whole) * 100);
+  const ss = String(whole).padStart(2, "0") +
+    (frac ? "." + String(frac).padStart(2, "0") : "");
+  return h + ":" + String(m).padStart(2, "0") + ":" + ss;
+}
 
 // jump the playhead to the typed time so the frame at a bound can be checked;
 // values past the end are clamped, empty ones do nothing
-const jump = (id) => { const t = parseFloat($(id).value); if (isFinite(t)) v.currentTime = Math.min(t, v.duration); };
+const jump = (id) => { const t = parseHMS($(id).value); if (isFinite(t)) v.currentTime = Math.min(t, v.duration); };
 $("goStart").onclick = () => jump("start");
 $("goEnd").onclick = () => jump("end");
 
 function fmt(s) {
-  if (!isFinite(s)) return "0:00";
-  const m = Math.floor(s / 60), r = Math.floor(s % 60);
-  return m + ":" + String(r).padStart(2, "0");
+  if (!isFinite(s)) return "0:00:00";
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), r = Math.floor(s % 60);
+  return h + ":" + String(m).padStart(2, "0") + ":" + String(r).padStart(2, "0");
 }
 
 let polling = null;
 $("submit").onclick = async () => {
+  const startText = $("start").value.trim();
+  const endText = $("end").value.trim();
+  const start = startText ? parseHMS(startText) : 0;
+  const end = endText ? parseHMS(endText) : 0;
+  if (!isFinite(start) || !isFinite(end)) {
+    note.className = "err";
+    note.textContent = "czas podaj jako h:mm:ss, np. 0:01:30";
+    return;
+  }
+
   const body = {
     x: rect.x, y: rect.y, w: rect.w, h: rect.h,
-    start: parseFloat($("start").value) || 0,
-    end: parseFloat($("end").value) || 0,
+    start, end,
     mute: $("mute").checked,
     format: $("format").value,
   };

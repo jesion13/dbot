@@ -225,6 +225,11 @@ func TestCropPageShowsTheFrameBeingCropped(t *testing.T) {
 		assert.Contains(t, body, `$("`+b.btn+`").onclick = () => jump("`+b.field+`")`)
 	}
 	assert.Contains(t, body, `v.currentTime = Math.min(t, v.duration)`)
+	// the trim boxes take h:mm:ss, the bot still receives seconds
+	assert.Contains(t, body, `id="start" type="text"`)
+	assert.Contains(t, body, `placeholder="0:00:00"`)
+	assert.Contains(t, body, "function parseHMS(s)")
+	assert.Contains(t, body, `const t = parseHMS($(id).value)`)
 }
 
 // the page, not the command, picks the format and whether to keep the audio
